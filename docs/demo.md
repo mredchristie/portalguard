@@ -129,9 +129,27 @@ That pairing is the demo. Either half alone proves less than it appears to.
 tcpdump -r ~/pg-demo/before.pcap -n 2>/dev/null | grep -oE 'A\? [^ ]+' | sort | uniq -c | sort -rn > ~/pg-demo/before-names.txt
 ```
 
-Then edit `before-names.txt` by hand, keeping the counts and generalising the
-names — `imap.mail.me.com` becomes `<mail provider>`, and so on. Show the
-redacted list, not the pcap.
+Then edit `before-names.txt` by hand, keeping the counts and replacing every
+name with a **category, not a product**:
+
+```
+  47  <mail provider>
+  31  <cloud storage sync>
+  18  <messaging app>
+   9  <OS telemetry>
+```
+
+Not `imap.mail.me.com`, and not `<iCloud Mail>` either. The same rule applies
+to process names if you ever show the enriched report — `<mail client>`, not
+the application's name.
+
+Two reasons. Naming products turns a demonstration of a general problem into a
+disclosure about your specific setup, which is the thing the tool exists to
+prevent. And the argument does not need them: "47 queries to a mail provider"
+lands exactly as hard as the brand would, without inviting the reader to
+inventory your machine.
+
+Show the redacted list, not the pcap.
 
 Delete the captures when you are done:
 

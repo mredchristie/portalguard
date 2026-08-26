@@ -13,6 +13,15 @@ coverage.*
 # macOS
 .DS_Store
 
+# Packet captures. A capture taken for the demo contains the hostnames this
+# machine reaches for - mail, cloud storage, messaging - so it is personal
+# data. Excluded up front rather than tidied up afterwards: the window where a
+# stray capture could be committed is exactly the window where nobody is
+# thinking about it.
+*.pcap
+*.pcapng
+pg-demo/
+
 # Local overrides
 *.local
 .env

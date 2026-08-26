@@ -4,7 +4,7 @@ BIN_DIR  := bin
 VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS  := -X main.version=$(VERSION)
 
-.PHONY: all build install test vet fmt clean detect rescue testenv-up testenv-down testenv-logs
+.PHONY: all build install test vet fmt clean detect rescue e2e testenv-up testenv-down testenv-logs
 
 all: vet test build
 
@@ -54,3 +54,10 @@ testenv-down:
 
 testenv-logs:
 	cd testenv && $(COMPOSE) logs -f
+
+# End-to-end test against the real pf backend. Needs root, and CUTS THE
+# NETWORK several times on purpose. See testenv/README.md for which half of
+# the test covers what - a green run is not end-to-end proof on its own.
+e2e: build
+	@echo "this needs root and will cut the network. run:"
+	@echo "    sudo ./testenv/e2e.sh"

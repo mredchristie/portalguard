@@ -14,6 +14,67 @@ It has two parts:
   address, which is what hotel networks do and what Portalguard's DNS hijack
   check is written to catch.
 
+## Which half of the test covers what
+
+**Read this before treating a green `e2e.sh` run as end-to-end proof.** The
+test is deliberately split, because on this Mac it cannot be otherwise.
+
+### Why it is split
+
+A container runtime on macOS cannot give you a portal that is genuinely off-box
+from the Mac's point of view. podman (and Docker Desktop — same architecture)
+publishes ports through a helper process running *on the Mac*, and BSD routes
+every local address through `lo0`:
+
+```
+$ route -n get 192.168.0.56        # this Mac's own LAN address
+  interface: lo0
+      flags: <UP,HOST,DONE,LLINFO,WASCLONED,LOCAL,IFSCOPE,IFREF>
+```
+
+That `LOCAL` flag is the kernel's own forwarding decision, and it is what pf
+matches `on lo0` against. So `pass quick on lo0 all` — a rule the lockdown
+cannot do without — would let any test against the container pass **without the
+gap rules doing anything at all**. A green run would prove nothing.
+
+### The split
+
+| Half | Target | Path | What it proves |
+| --- | --- | --- | --- |
+| **pf behaviour** | the LAN gateway | `en0` | The block really blocks, the gap really opens, the seal really closes |
+| **portal semantics** | the container | `lo0` | Redirect is detected, host is extracted, accept flips detection to open |
+
+The pf half uses the default gateway as a stand-in portal. It answers HTTP, it
+is reached over `en0`, and it has exactly a real captive portal's topology —
+on most hotel and home networks the portal *is* the gateway.
+
+**The gateway is a read-only target.** The test sends it HTTP GETs and nothing
+else. No device outside this Mac is configured, modified, or written to.
+
+The two halves are joined by pointing the fake portal's redirect at the
+gateway:
+
+```fish
+cd testenv
+env PORTAL_URL=http://192.168.0.1/ podman compose up -d --force-recreate portal
+```
+
+Detection then probes the container over `lo0`, reads a redirect to
+`192.168.0.1`, and pins the gap to that address — which is off-box. One flow,
+both halves, each doing the part it can honestly do.
+
+### What is still not covered
+
+- **A portal that is genuinely remote.** The login page in the pf half is the
+  gateway's own web UI, not the fake portal. Detection's parsing of a real
+  portal response is exercised over `lo0` only.
+- **A hostile network.** The gateway cooperates. It does not hijack DNS,
+  intercept probes, or drop packets.
+- **Roaming**, DHCP lease expiry mid-lockdown, and IPv6-only networks.
+
+Closing these needs a second device on the LAN running the portal, at which
+point the split disappears and `e2e.sh` can point at it with `GATEWAY=`.
+
 ## What it does and does not simulate
 
 It simulates the portal's **answers**: the redirect, the interstitial, the 511,
@@ -88,7 +149,8 @@ Configuration lives in `.env` (copy `.env.example`):
 
 | Variable      | Meaning                                                        |
 | ------------- | -------------------------------------------------------------- |
-| `PORTAL_IP`   | Address clients are told to reach the portal on. Must be reachable *from the client*. |
+| `PORTAL_IP`   | Address dnsmasq answers every query with. Must be reachable *from the client*. |
+| `PORTAL_URL`  | Where the portal redirects clients. Unset means "wherever you reached me", which is right for both localhost and LAN clients. Set it to aim the gap at a specific address. |
 | `PORTAL_PORT` | Host port for the portal. Default 8080.                          |
 | `DNS_PORT`    | Host port for dnsmasq. Default 5354 - not 5353, which is mDNS and already taken on macOS. |
 | `MODE`        | `redirect`, `interstitial` or `511`.                             |
@@ -155,6 +217,27 @@ networking:
    `-probe no_content=http://<mac-ip>:8080/generate_204`.
 
 macOS will likely prompt to allow incoming connections the first time.
+
+## Running the end-to-end test
+
+```fish
+make build
+make testenv-up
+sudo ./testenv/e2e.sh
+```
+
+It cuts this machine's network several times, on purpose. Every privileged
+command is echoed before it runs, and the `EXIT` trap flushes the anchor
+whether the run passes, fails, or is interrupted. If something goes wrong
+anyway:
+
+```fish
+make rescue
+```
+
+Overridable with environment variables: `GATEWAY` (the off-box target,
+defaults to the default route's gateway), `CONTROL` (a host that must stay
+blocked, default `1.1.1.1`), `PORTAL`, `PROBES`, `WAIT`.
 
 ## Endpoints
 

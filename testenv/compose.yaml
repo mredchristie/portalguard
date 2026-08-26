@@ -20,9 +20,14 @@ services:
     environment:
       # How the portal announces itself: redirect | interstitial | 511.
       MODE: ${MODE:-redirect}
-      # Where clients are sent to log in. Must be reachable *from the client*,
-      # which is why it is built from PORTAL_IP rather than a container name.
-      PORTAL_URL: http://${PORTAL_IP:-127.0.0.1}:${PORTAL_PORT:-8080}/login
+      # Where clients are sent to log in. Leave unset and the portal redirects
+      # to whichever host the client used to reach it, which is self-configuring
+      # and right for both localhost and LAN clients.
+      #
+      # Set it explicitly to point the redirect somewhere else entirely - which
+      # is how the end-to-end test puts a genuinely off-box address in the gap.
+      # See testenv/README.md, "Which half of the test covers what".
+      PORTAL_URL: ${PORTAL_URL:-}
     ports:
       # Host 8080 -> container 80. Publishing 80 directly needs root on macOS.
       - "${PORTAL_PORT:-8080}:80"

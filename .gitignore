@@ -1,0 +1,17 @@
+# Build output
+/bin/
+/dist/
+portalguard
+
+# Go
+*.test
+*.out
+coverage.*
+
+# macOS
+.DS_Store
+
+# Local overrides
+*.local
+.env
+testenv/.env

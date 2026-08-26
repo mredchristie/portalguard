@@ -4,7 +4,7 @@ BIN_DIR  := bin
 VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS  := -X main.version=$(VERSION)
 
-.PHONY: all build install test vet fmt clean detect testenv-up testenv-down testenv-logs panic-check
+.PHONY: all build install test vet fmt clean detect rescue testenv-up testenv-down testenv-logs
 
 all: vet test build
 
@@ -30,6 +30,16 @@ clean:
 # Convenience: run detection against the current network.
 detect: build
 	./$(BIN_DIR)/$(BINARY) detect -v
+
+# --- Recovery -----------------------------------------------------------------
+# If portalguard dies while the firewall is engaged, this is how you get your
+# network back. It empties our pf anchor and touches nothing else on the
+# system, needs no portalguard binary, and is safe to run at any time even if
+# nothing is installed. Documented in README.md and docs/pf-design.md.
+rescue:
+	@echo "flushing the portalguard pf anchor (needs sudo)..."
+	sudo pfctl -a portalguard -F all
+	@echo "done - normal networking restored."
 
 # --- Test captive portal (see testenv/README.md) -----------------------------
 # COMPOSE can be overridden: make COMPOSE="podman compose" testenv-up

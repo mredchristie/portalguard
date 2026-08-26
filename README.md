@@ -149,12 +149,24 @@ comes back.**
 - pf is enabled through its reference-counted interface (`pfctl -E` / `-X`), so
   Portalguard never disables pf out from under another user of it.
 
-`SIGKILL` and a power cut are the cases no handler can catch. For those:
+`SIGKILL` and a power cut are the cases no handler can catch. For those, one
+line gets your network back:
 
 ```fish
-sudo portalguard release
-# or, if the binary is gone entirely:
+make rescue
+```
+
+which is exactly:
+
+```fish
 sudo pfctl -a portalguard -F all
 ```
 
+No portalguard binary needed, safe to run when nothing is installed, and it
+touches nothing on the system but our own anchor. `sudo portalguard release`
+does the same and also drops our pf enable reference.
+
 A reboot also clears it, since nothing is persisted.
+
+Full detail — the anchor setup, every rule line by line, and how Portalguard
+stays out of NordVPN's way — is in [`docs/pf-design.md`](docs/pf-design.md).

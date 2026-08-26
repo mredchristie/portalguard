@@ -57,6 +57,14 @@ type Backend struct {
 	// macOS is shared: we must release our reference with `pfctl -X <token>`
 	// rather than disabling pf outright, or we break other users of pf.
 	enableToken string
+
+	// logCreated records whether *we* created the pflog device. One we found
+	// already there belongs to somebody else and is never destroyed.
+	logCreated bool
+
+	// logNote carries a non-fatal problem with leak logging, surfaced in
+	// Status rather than failing the operation that hit it.
+	logNote string
 }
 
 // New returns the macOS pf backend.
@@ -105,12 +113,23 @@ func (b *Backend) Release(ctx context.Context) error {
 		}
 	}
 
+	// The log device goes with the rules, and only if it was ours.
+	if err := b.destroyLogInterface(ctx); err != nil {
+		errs = append(errs, err)
+	}
+
+	// The token may have been written by an earlier invocation: `lockdown` and
+	// `release` are usually different processes.
+	if b.enableToken == "" {
+		b.enableToken = loadToken()
+	}
 	if b.enableToken != "" {
 		if _, err := b.pfctl(ctx, "-X", b.enableToken); err != nil {
 			errs = append(errs, fmt.Errorf("release pf enable token %s: %w", b.enableToken, err))
 		}
 		b.enableToken = ""
 	}
+	clearToken()
 
 	b.phase = firewall.PhaseOff
 	b.allowed = nil
@@ -123,6 +142,10 @@ func (b *Backend) Release(ctx context.Context) error {
 func (b *Backend) Status(ctx context.Context) (firewall.Status, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
+	if ok, _ := b.availableLocked(ctx); ok {
+		b.syncFromKernel(ctx)
+	}
 
 	st := firewall.Status{
 		Backend: b.Name(),
@@ -149,6 +172,9 @@ func (b *Backend) Status(ctx context.Context) (firewall.Status, error) {
 	rules := strings.TrimSpace(out)
 	st.Managed = rules != ""
 	st.Detail = rules
+	if b.logNote != "" {
+		st.Detail = b.logNote + "\n" + st.Detail
+	}
 	if !st.Managed {
 		st.Phase = firewall.PhaseOff
 	}

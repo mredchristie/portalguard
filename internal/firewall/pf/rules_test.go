@@ -95,8 +95,8 @@ func TestGapRulesetShape(t *testing.T) {
 		"table <pg_dns> persist { 192.168.1.1 192.168.1.2 }",
 		"pass out quick inet  proto tcp to <pg_portal> port { 80, 443, 8080 } keep state",
 		"pass out quick inet6 proto tcp to <pg_portal> port { 80, 443, 8080 } keep state",
-		"pass out log quick inet  proto { tcp, udp } to <pg_dns> port 53 keep state",
-		"pass out log quick inet6 proto { tcp, udp } to <pg_dns> port 53 keep state",
+		"pass out log (all, user) quick inet  proto { tcp, udp } to <pg_dns> port 53 keep state",
+		"pass out log (all, user) quick inet6 proto { tcp, udp } to <pg_dns> port 53 keep state",
 	} {
 		i := lineIndex(rules, must)
 		if i < 0 {
@@ -110,14 +110,67 @@ func TestGapRulesetShape(t *testing.T) {
 }
 
 func TestGapDNSRulesAreLogged(t *testing.T) {
-	// The leak report depends on pf copying these to pflog0.
+	// The leak report depends on pf copying these to the pflog device.
 	rules := render(gapFromHosts(sampleHosts()))
+	for _, line := range dnsRuleLines(rules) {
+		// `all` because pf otherwise logs only the state-establishing packet,
+		// and mDNSResponder multiplexes queries over one long-lived socket -
+		// the case where the report would say "1 query" for a gap that leaked
+		// fifty. `user` because it is what names the processes responsible.
+		if !strings.Contains(line, "log (all, user") {
+			t.Errorf("DNS pass rule must log (all, user): %q", line)
+		}
+	}
+}
+
+// dnsRuleLines returns the non-comment rule lines touching port 53.
+func dnsRuleLines(rules string) []string {
+	var out []string
 	for _, line := range strings.Split(rules, "\n") {
 		if strings.Contains(line, "port 53") && !strings.HasPrefix(strings.TrimSpace(line), "#") {
-			if !strings.Contains(line, " log ") {
-				t.Errorf("DNS pass rule must carry log: %q", line)
-			}
+			out = append(out, line)
 		}
+	}
+	return out
+}
+
+func TestGapLogsToDedicatedDevice(t *testing.T) {
+	g := gapFromHosts(sampleHosts())
+	g.logTo = LogInterface
+	for _, line := range dnsRuleLines(render(g)) {
+		if !strings.Contains(line, "to "+LogInterface) {
+			t.Errorf("DNS rule should log to the dedicated device: %q", line)
+		}
+	}
+}
+
+// TestGapWithoutLogDeviceOmitsTheInterface is the degradation path that
+// matters: if the pflog device could not be created, the ruleset must not name
+// it. A rule referring to an interface that is not there risks failing to
+// load, and failing to open the gap because logging is unavailable would leave
+// the user unable to log in at all.
+func TestGapWithoutLogDeviceOmitsTheInterface(t *testing.T) {
+	g := gapFromHosts(sampleHosts())
+	g.logTo = ""
+	rules := render(g)
+	if strings.Contains(rules, "to pflog") {
+		t.Errorf("no log device means no interface may be named:\n%s", rules)
+	}
+	// Logging is still requested, so it lands on the default and is discarded
+	// harmlessly if that does not exist either.
+	for _, line := range dnsRuleLines(rules) {
+		if !strings.Contains(line, "log (all, user)") {
+			t.Errorf("should still request logging: %q", line)
+		}
+	}
+}
+
+func TestLogClause(t *testing.T) {
+	if got := (gap{}).logClause(); got != "log (all, user)" {
+		t.Errorf("logClause() = %q", got)
+	}
+	if got := (gap{logTo: "pflog1"}).logClause(); got != "log (all, user, to pflog1)" {
+		t.Errorf("logClause(pflog1) = %q", got)
 	}
 }
 

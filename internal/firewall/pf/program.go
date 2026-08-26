@@ -49,6 +49,7 @@ func (b *Backend) AllowHost(ctx context.Context, h firewall.Host) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	b.syncFromKernel(ctx)
 	if b.phase == firewall.PhaseOff {
 		return firewall.ErrNotLocked
 	}
@@ -56,15 +57,31 @@ func (b *Backend) AllowHost(ctx context.Context, h firewall.Host) error {
 		return fmt.Errorf("pf: refusing to open a hole for %q with no address", h.Name)
 	}
 
-	next := append(append([]firewall.Host(nil), b.allowed...), h)
-	if err := b.loadLocked(ctx, gapFromHosts(next)); err != nil {
+	// Set up the log device before the gap opens, so the first leaked query is
+	// captured rather than missed. A failure here is reported and ignored:
+	// losing the leak log is bad, but failing to open the gap over it would
+	// leave the user unable to log in at all.
+	g := gapFromHosts(next(b.allowed, h))
+	if created, err := b.ensureLogInterface(ctx); err != nil {
+		b.logNote = fmt.Sprintf("leak logging unavailable: %v", err)
+	} else {
+		b.logCreated = b.logCreated || created
+		g.logTo = LogInterface
+	}
+
+	if err := b.loadLocked(ctx, g); err != nil {
 		// The previous ruleset is still loaded, so the failure leaves the
 		// filter no more permissive than it already was.
 		return err
 	}
-	b.allowed = next
+	b.allowed = next(b.allowed, h)
 	b.phase = firewall.PhaseGap
 	return nil
+}
+
+// next returns the allow-list with one more host on it.
+func next(current []firewall.Host, h firewall.Host) []firewall.Host {
+	return append(append([]firewall.Host(nil), current...), h)
 }
 
 // Seal closes the gap and returns to a bare lockdown.
@@ -78,6 +95,7 @@ func (b *Backend) Seal(ctx context.Context) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	b.syncFromKernel(ctx)
 	if b.phase == firewall.PhaseOff {
 		return firewall.ErrNotLocked
 	}
@@ -93,6 +111,9 @@ func (b *Backend) Seal(ctx context.Context) error {
 	}
 	b.phase = firewall.PhaseLocked
 	b.allowed = nil
+	if err := b.destroyLogInterface(ctx); err != nil {
+		b.logNote = err.Error()
+	}
 
 	var failed []string
 	for _, ip := range addrs {
@@ -178,6 +199,11 @@ func (b *Backend) enableLocked(ctx context.Context) error {
 	}
 	if m := tokenRe.FindStringSubmatch(out); m != nil {
 		b.enableToken = m[1]
+		// Persist it: the process that releases is usually not the one that
+		// enabled, and an unreleased reference outlives us otherwise.
+		if err := saveToken(b.enableToken); err != nil {
+			return err
+		}
 		return nil
 	}
 	// pf is enabled but we have no token to release later. Say so rather than

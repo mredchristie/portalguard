@@ -28,6 +28,11 @@ const (
 	portalTable = "pg_portal"
 	// dnsTable holds the resolvers this network handed us.
 	dnsTable = "pg_dns"
+	// LogInterface is the pflog pseudo-device our rules log to. A dedicated
+	// device rather than the default pflog0, for the same reason the rules
+	// live in a dedicated anchor: nothing else on the system owns it, so
+	// creating and destroying it cannot disturb another tool.
+	LogInterface = "pflog1"
 )
 
 // defaultPortalPorts is the port set opened for the portal when detection
@@ -39,6 +44,13 @@ type gap struct {
 	portalAddrs []net.IP
 	portalPorts []int
 	dnsAddrs    []net.IP
+	// logTo names the pflog interface the DNS rules log to. Empty means log
+	// without naming a device, which pf sends to pflog0 and discards harmlessly
+	// if that does not exist either. It is empty whenever we could not create
+	// our own log device: a ruleset naming an interface that is not there may
+	// fail to load, and failing to open the gap because we could not set up
+	// logging would be the tail wagging the dog.
+	logTo string
 }
 
 // isOpen reports whether there is anything to let through.
@@ -134,11 +146,16 @@ func render(g gap) string {
 		if len(g.dnsAddrs) > 0 {
 			b.WriteString("\n# DNS to this network's resolvers and only them. This hole is machine-wide:\n")
 			b.WriteString("# every background daemon's queued lookups fire through it the moment it\n")
-			b.WriteString("# opens. Connections stay blocked, hostnames do not. `log` copies matches\n")
-			b.WriteString("# to pflog0 so what leaked can be counted and reported.\n")
+			b.WriteString("# opens. Connections stay blocked, hostnames do not.\n")
+			b.WriteString("#\n")
+			b.WriteString("# log (all) rather than bare log: pf logs only the packet that establishes\n")
+			b.WriteString("# a state, and mDNSResponder multiplexes queries over long-lived sockets,\n")
+			b.WriteString("# so bare log would report one query for a gap that leaked fifty.\n")
+			b.WriteString("# log (user) adds the uid and pid owning the socket, which is what lets\n")
+			b.WriteString("# the leak report name the processes responsible.\n")
 			for _, af := range []string{"inet ", "inet6"} {
-				fmt.Fprintf(&b, "pass out log quick %s proto { tcp, udp } to <%s> port 53 keep state\n",
-					af, dnsTable)
+				fmt.Fprintf(&b, "pass out %s quick %s proto { tcp, udp } to <%s> port 53 keep state\n",
+					g.logClause(), af, dnsTable)
 			}
 		}
 	}
@@ -146,6 +163,16 @@ func render(g gap) string {
 	b.WriteString("\n")
 	b.WriteString(blocks)
 	return b.String()
+}
+
+// logClause renders the log keyword and its options. The device is named only
+// when we have one, so a missing pflog interface can never stop the gap from
+// opening.
+func (g gap) logClause() string {
+	if g.logTo == "" {
+		return "log (all, user)"
+	}
+	return fmt.Sprintf("log (all, user, to %s)", g.logTo)
 }
 
 // renderTable emits a pf table declaration. An empty table is declared without

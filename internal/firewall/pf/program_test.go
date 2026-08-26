@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mredchristie/portalguard/internal/firewall"
+	"portalguard/internal/firewall"
 )
 
 // fakePfctl stands in for pfctl and ifconfig, so the whole rule-programming

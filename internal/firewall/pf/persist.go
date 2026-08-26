@@ -8,7 +8,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/mredchristie/portalguard/internal/firewall"
+	"portalguard/internal/firewall"
 )
 
 // tokenPath holds the pf enable reference token between invocations.

@@ -8,11 +8,11 @@ import (
 	"os"
 	"time"
 
-	"github.com/mredchristie/portalguard/internal/firewall"
-	"github.com/mredchristie/portalguard/internal/firewall/backend"
-	"github.com/mredchristie/portalguard/internal/netinfo"
-	"github.com/mredchristie/portalguard/internal/portal"
-	"github.com/mredchristie/portalguard/internal/state"
+	"portalguard/internal/firewall"
+	"portalguard/internal/firewall/backend"
+	"portalguard/internal/netinfo"
+	"portalguard/internal/portal"
+	"portalguard/internal/state"
 )
 
 // checkNoActiveVPN refuses to engage the firewall while a VPN owns the default

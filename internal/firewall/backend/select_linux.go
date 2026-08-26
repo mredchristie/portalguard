@@ -3,8 +3,8 @@
 package backend
 
 import (
-	"github.com/mredchristie/portalguard/internal/firewall"
-	"github.com/mredchristie/portalguard/internal/firewall/nftables"
+	"portalguard/internal/firewall"
+	"portalguard/internal/firewall/nftables"
 )
 
 // New returns the Linux nftables backend (currently a stub).

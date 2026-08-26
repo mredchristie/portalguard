@@ -26,7 +26,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mredchristie/portalguard/internal/firewall"
+	"portalguard/internal/firewall"
 )
 
 // AnchorName is the pf anchor that holds every rule Portalguard installs.

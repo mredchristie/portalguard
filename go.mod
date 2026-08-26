@@ -1,3 +1,3 @@
-module github.com/mredchristie/portalguard
+module portalguard
 
 go 1.26.5

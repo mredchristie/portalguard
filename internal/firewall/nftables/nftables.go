@@ -22,7 +22,7 @@ import (
 	"context"
 	"runtime"
 
-	"github.com/mredchristie/portalguard/internal/firewall"
+	"portalguard/internal/firewall"
 )
 
 // Backend is the Linux nftables backend.

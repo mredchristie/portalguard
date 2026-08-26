@@ -5,7 +5,7 @@ package main
 import (
 	"errors"
 
-	"github.com/mredchristie/portalguard/internal/firewall/pf"
+	"portalguard/internal/firewall/pf"
 )
 
 // pfNoAnchorHook exposes the pf-specific sentinel to the platform-neutral

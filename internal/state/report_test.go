@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mredchristie/portalguard/internal/firewall"
+	"portalguard/internal/firewall"
 )
 
 // reportingBackend is a fake that accounts for its traffic, like the pf

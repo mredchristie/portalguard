@@ -2,7 +2,7 @@
 
 package backend
 
-import "github.com/mredchristie/portalguard/internal/firewall"
+import "portalguard/internal/firewall"
 
 // New returns a backend that refuses to program anything.
 func New() firewall.Backend { return firewall.Unsupported{} }

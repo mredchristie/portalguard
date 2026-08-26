@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mredchristie/portalguard/internal/firewall"
+	"portalguard/internal/firewall"
 )
 
 // Lockdown blocks everything except what the machine needs to stay on the

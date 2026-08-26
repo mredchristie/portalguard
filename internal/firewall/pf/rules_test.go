@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mredchristie/portalguard/internal/firewall"
+	"portalguard/internal/firewall"
 )
 
 func ips(ss ...string) []net.IP {

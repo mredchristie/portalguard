@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mredchristie/portalguard/internal/firewall"
-	"github.com/mredchristie/portalguard/internal/portal"
+	"portalguard/internal/firewall"
+	"portalguard/internal/portal"
 )
 
 // ErrNoPortal is returned when an action needs a known portal and detection

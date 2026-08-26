@@ -3,8 +3,8 @@
 package backend
 
 import (
-	"github.com/mredchristie/portalguard/internal/firewall"
-	"github.com/mredchristie/portalguard/internal/firewall/pf"
+	"portalguard/internal/firewall"
+	"portalguard/internal/firewall/pf"
 )
 
 // New returns the macOS pf backend.

@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mredchristie/portalguard/internal/firewall"
-	"github.com/mredchristie/portalguard/internal/portal"
+	"portalguard/internal/firewall"
+	"portalguard/internal/portal"
 )
 
 // fakeBackend records calls so tests can assert on the order the firewall was

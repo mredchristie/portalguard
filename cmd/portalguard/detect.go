@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mredchristie/portalguard/internal/portal"
+	"portalguard/internal/portal"
 )
 
 // probeList collects repeated -probe flags.

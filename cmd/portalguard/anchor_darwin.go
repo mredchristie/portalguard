@@ -10,8 +10,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/mredchristie/portalguard/internal/firewall"
-	"github.com/mredchristie/portalguard/internal/firewall/pf"
+	"portalguard/internal/firewall"
+	"portalguard/internal/firewall/pf"
 )
 
 // runInstallAnchor adds the one line to /etc/pf.conf that makes our anchor's

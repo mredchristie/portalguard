@@ -179,7 +179,14 @@ pass quick on lo0 all
 
 # 2. DHCP, both directions. Without this the lease expires while we are
 #    locked down and the network disappears underneath us - which looks
-#    exactly like Portalguard having broken the machine.
+#    exactly like Portalguard having broken the machine. The inbound rule is
+#    scoped to a single protocol and port pair the OS parses anyway.
+#
+#    Deliberately no DHCPv6 (udp 546/547). A stateful DHCPv6 lease could
+#    expire mid-lockdown on an IPv6-heavy network, but captive portal networks
+#    that use stateful DHCPv6 are close to nonexistent, and widening the hole
+#    for a case nobody has hit is the wrong trade. If it ever bites, the fix
+#    is two more lines here, mirroring these.
 pass out quick inet proto udp from any port 68 to any port 67 no state
 pass in  quick inet proto udp from any port 67 to any port 68 no state
 
@@ -237,9 +244,11 @@ pass out quick inet6 proto tcp to <pg_portal> port { 80, 443, 8080 } keep state
 # 6. DNS to the resolvers this network handed us, and only to them. The login
 #    flow has to resolve the portal's own hostname, and on a locked-down
 #    machine no other resolver is reachable. This is the widest part of the
-#    gap and the reason GAP_OPEN is meant to last a minute, not an hour.
-pass out quick inet  proto { tcp, udp } to <pg_dns> port 53 keep state
-pass out quick inet6 proto { tcp, udp } to <pg_dns> port 53 keep state
+#    gap - see "The DNS hole is machine-wide" below - and the reason GAP_OPEN
+#    is meant to last a minute, not an hour. `log` sends matches to pflog0 so
+#    every query made through the hole can be recorded and shown.
+pass out log quick inet  proto { tcp, udp } to <pg_dns> port 53 keep state
+pass out log quick inet6 proto { tcp, udp } to <pg_dns> port 53 keep state
 
 block drop out quick all
 block drop in  quick all
@@ -254,6 +263,51 @@ provider on a second hostname is the usual case) gets it explicitly, via
 `sudo portalguard allow <host>`, which adds to `<pg_portal>` and is visible in
 `status`.
 
+### The DNS hole is machine-wide
+
+The DNS pass rule is the one part of the gap that deserves to be uncomfortable,
+and the reason is not the exotic one.
+
+The exotic risk is a DNS tunnel: an attacker exfiltrating data as query names
+through the portal's resolver. Real, but it needs something already running on
+the machine that wants to do that.
+
+The ordinary risk is worse because it happens every single time. **The DNS hole
+is machine-wide.** The moment it opens, every background process that has been
+sitting on a failed lookup retries at once - Mail, iCloud, Dropbox, Calendar,
+every app that noticed the new link. Their *connections* stay blocked by the
+rules below, so no data leaves. But the *queries* go through, and the portal's
+resolver learns the hostname of every service you use. Hostnames are metadata,
+and metadata is most of what an observer on a hotel network wanted anyway.
+
+Portalguard cannot honestly claim to prevent this in v0.1. What it will do is
+make it visible:
+
+- The DNS pass rules carry `log`, so pf copies matching packets to `pflog0`.
+- A reader on `pflog0` records every query made while the gap is open and
+  reports it when the gap closes: how many, to whom, and for what names.
+
+So the seal message becomes something like *"gap open for 47 seconds; 23 DNS
+queries leaked to 192.168.1.1 from 6 processes"* - concrete, honest, and the
+best possible argument for keeping GAP_OPEN short. It also happens to be the
+most persuasive thing this tool can put on a screen.
+
+**Not yet implemented.** The `log` keyword is in the ruleset above; the
+`pflog0` reader is the remaining piece of v0.1.
+
+The real fix is v0.2 and it is narrow rather than visible. pf on macOS can
+match on the uid owning an outbound socket:
+
+```pf
+pass out quick inet proto { tcp, udp } to <pg_dns> port 53 user 501 keep state
+```
+
+Scope the DNS and portal rules to the uid of the browser doing the login and
+background daemons cannot reach the hole at all. That turns a machine-wide
+hole into a one-process hole. It needs to know which process will do the
+logging in, which is straightforward once there is a menu bar app that opens
+the login page itself.
+
 Addresses are **pinned at detection time**. The gap is written against the IPs
 the portal resolved to when we probed, not against a hostname. Otherwise a
 portal that controls DNS — which, per the hijack check, it usually does —
@@ -263,12 +317,24 @@ could point its own name anywhere it liked after we opened the hole.
 
 Seal reloads the LOCKED_DOWN ruleset, dropping the tables and the pass rules.
 That closes the hole for new connections, but existing states created while
-the gap was open would survive a rule change, so it also kills them, targeted
-at the portal only:
+the gap was open would survive a rule change, so it also kills them:
 
 ```fish
-sudo pfctl -k 0.0.0.0/0 -k <portal-ip>   # once per pinned address
+sudo pfctl -k 0.0.0.0/0 -k <addr>   # once per address, see below
 ```
+
+**"Once per pinned address" means the full contents of `<pg_portal>` and
+`<pg_dns>` at seal time, not just the IP detection originally found.** If the
+user ran `portalguard allow payments.example` because the portal bounced
+through a payment provider, that address is in the table and must be killed
+too - otherwise sealing leaves a live connection to a third party open, which
+is precisely the leak the seal exists to close. The implementation reads the
+tables back from the kernel rather than trusting its own bookkeeping.
+
+Collateral is worth naming: on most home and hotel networks the portal *is*
+the default gateway, so `-k 0.0.0.0/0 -k <gateway>` kills every state to the
+gateway. That is fine here - while we are locked down nothing else should have
+states to it - but it would not be fine if this ran outside a lockdown.
 
 `-k` is documented as: "A network prefix length of 0 can be used as a
 wildcard. To kill all states with the target host2: `pfctl -k 0.0.0.0/0 -k
@@ -292,7 +358,21 @@ want to remember two flags.
 
 ### Still to verify, with sudo, before this is trusted
 
-In this order, on a network I can afford to lose:
+**Step 0, before anything else: have the exit plan in your hand.** Step 3 cuts
+your network on purpose. The difference between a ten-second test and a
+confused twenty minutes is whether the way out is already proven and already
+typed.
+
+```fish
+make rescue    # against an empty anchor, right now, before step 1
+```
+
+It should print the flush and succeed against an anchor that has nothing in
+it. That confirms the command, the sudo prompt and the anchor name are all
+correct while you still have a working network to fix them on. Leave this
+document or the terminal history open on your phone before step 3.
+
+Then, in this order:
 
 1. `sudo pfctl -sr` — confirm the anchor line appears in the main ruleset
    after install.
@@ -302,6 +382,9 @@ In this order, on a network I can afford to lose:
 3. `sudo pfctl -a portalguard -f -` with the LOCKED_DOWN ruleset, then
    immediately `sudo pfctl -a portalguard -s rules` to confirm it is really
    there, and `make rescue` to get back out.
+
+Step 3 is the first command in this whole project that can take your network
+away. Everything before it is inspection or parsing.
 
 ---
 
@@ -473,16 +556,27 @@ not the eventual design.
 
 ---
 
-## Open questions for review
+## Decisions, reviewed and settled
 
-1. **Anchor placement before `com.apple/*`** — this is what makes our block
-   authoritative, but it means AirDrop and Application Firewall rules are not
-   consulted while we are locked down. That is intended. Confirm you agree.
-2. **DHCP stays open during lockdown.** It has to, or the lease dies. It is
-   also a broadcast channel we are not inspecting. I think it is unavoidable
-   and low risk; worth a second opinion.
-3. **DNS to the network's resolvers is the widest part of the gap** — a DNS
-   tunnel out through a hostile portal's resolver is a real, if exotic,
-   exfiltration path. The alternative is DoH to a pinned address, which most
-   portals block until you authenticate, which defeats the point.
-4. **`--allow-active-vpn` as an escape hatch** rather than a hard refusal.
+Four questions went to review. All four are settled; recording them here so
+the reasoning survives the next person who wonders why.
+
+1. **Anchor placed before `com.apple/*`.** Approved. While locked down you do
+   not want AirDrop or the Application Firewall punching pass rules underneath
+   you, and the empty-anchor case falls through unchanged, so there is no cost
+   when the tool is idle.
+2. **DHCP stays open during lockdown.** Approved as unavoidable and low risk:
+   the inbound rule is scoped to one protocol and port pair the OS parses
+   anyway. DHCPv6 is acknowledged in a comment rather than allowed for.
+3. **DNS is the widest part of the gap.** Accepted, with the real leak named
+   rather than the exotic one — see "The DNS hole is machine-wide". v0.1 ships
+   the cheap mitigation: keep the gap short, log every query made through it,
+   and report the count when the gap closes. The `user`-scoped rules that
+   actually close it are v0.2.
+4. **`--allow-active-vpn` as an opt-in escape hatch** rather than a hard
+   refusal. Approved: a hard refusal punishes anyone whose VPN the detection
+   misreads. Opt-in, loud, logged.
+
+One framing to keep when this goes public: the handoff window in section 3 is
+named rather than quietly ignored. An honest account of the leak that remains
+is the thing that makes the account of the leaks we do close believable.

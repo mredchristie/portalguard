@@ -90,7 +90,7 @@ Configuration lives in `.env` (copy `.env.example`):
 | ------------- | -------------------------------------------------------------- |
 | `PORTAL_IP`   | Address clients are told to reach the portal on. Must be reachable *from the client*. |
 | `PORTAL_PORT` | Host port for the portal. Default 8080.                          |
-| `DNS_PORT`    | Host port for dnsmasq. Default 5353.                             |
+| `DNS_PORT`    | Host port for dnsmasq. Default 5354 - not 5353, which is mDNS and already taken on macOS. |
 | `MODE`        | `redirect`, `interstitial` or `511`.                             |
 
 For a same-Mac test, `PORTAL_IP=127.0.0.1` is fine. To involve another device,
@@ -123,8 +123,8 @@ macOS's DNS settings have no port field. Two options:
    the wildcard behaviour by hand:
 
    ```fish
-   dig @127.0.0.1 -p 5353 anything.example +short
-   dig @127.0.0.1 -p 5353 pg-test.portalguard.invalid +short
+   dig @127.0.0.1 -p 5354 anything.example +short
+   dig @127.0.0.1 -p 5354 pg-test.portalguard.invalid +short
    ```
 
    Both should return `PORTAL_IP`. The second is the exact query

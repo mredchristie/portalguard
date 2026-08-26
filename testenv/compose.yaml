@@ -35,9 +35,10 @@ services:
       # Every name resolves here. Clients must be able to reach this address.
       PORTAL_IP: ${PORTAL_IP:-127.0.0.1}
     ports:
-      # 5353 by default: binding 53 needs root, and on macOS it collides with
-      # mDNSResponder. Use DNS_PORT=53 with a runtime that can bind it when you
-      # want to point a real device's DNS setting here.
-      - "${DNS_PORT:-5353}:53/udp"
-      - "${DNS_PORT:-5353}:53/tcp"
+      # 5354 by default: binding 53 needs root, and 5353 is mDNS - taken on
+      # macOS by mDNSResponder and by any app doing Bonjour discovery (Spotify
+      # is a reliable offender). Use DNS_PORT=53 with a runtime that can bind
+      # it when you want to point a real device's DNS setting here.
+      - "${DNS_PORT:-5354}:53/udp"
+      - "${DNS_PORT:-5354}:53/tcp"
     restart: unless-stopped

@@ -47,7 +47,7 @@ COMPOSE ?= docker compose
 
 testenv-up:
 	cd testenv && $(COMPOSE) up --build -d
-	@echo "Portal up. Web: http://localhost:8080  DNS: localhost:5353 (udp)"
+	@echo "Portal up. Web: http://localhost:8080  DNS: localhost:5354 (udp)"
 
 testenv-down:
 	cd testenv && $(COMPOSE) down -v

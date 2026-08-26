@@ -234,8 +234,14 @@ func (b *Backend) enableLocked(ctx context.Context) error {
 		b.enableToken = m[1]
 		// Persist it: the process that releases is usually not the one that
 		// enabled, and an unreleased reference outlives us otherwise.
+		//
+		// Best effort on purpose. Failing the lockdown because a bookkeeping
+		// file could not be written would refuse to protect the machine over
+		// an accounting problem. The cost of losing it is that another
+		// process cannot drop our pf enable reference - rules still flush,
+		// so the network still comes back.
 		if err := saveToken(b.enableToken); err != nil {
-			return err
+			b.logNote = fmt.Sprintf("could not persist the pf enable token (%v); `release` from another process will flush rules but leave pf's enable count raised until reboot", err)
 		}
 		return nil
 	}

@@ -58,6 +58,8 @@ testenv-logs:
 # End-to-end test against the real pf backend. Needs root, and CUTS THE
 # NETWORK several times on purpose. See testenv/README.md for which half of
 # the test covers what - a green run is not end-to-end proof on its own.
+# Depends on build so the test can never run against a stale binary - which
+# has already produced one full round of false failures.
 e2e: build
-	@echo "this needs root and will cut the network. run:"
-	@echo "    sudo ./testenv/e2e.sh"
+	@echo "this needs root and CUTS THE NETWORK several times on purpose."
+	sudo ./testenv/e2e.sh

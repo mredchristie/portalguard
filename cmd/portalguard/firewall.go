@@ -230,12 +230,20 @@ flags:
 }
 
 // runFlow drives the whole sequence and blocks until the user has logged in.
-// printReport shows what the firewall accounted for, if the backend could
-// account for anything. Silence is better than a row of zeros that cannot be
-// told apart from a quiet network.
+// printReport shows what the firewall accounted for.
+//
+// It never returns silently. A missing report and an empty one mean different
+// things, and both mean something different again from "nothing leaked" - so
+// each says which it is. Silence here once cost a debugging session: the
+// report was absent and there was no output to say whether that was because
+// the backend could not account for traffic, because the counters read as
+// zero, or because the code was not in the binary at all.
 func printReport(sess *state.Session) {
 	rep, ok := sess.Report()
 	if !ok {
+		fmt.Println("\nThis firewall backend cannot account for the traffic it filtered,")
+		fmt.Println("so there is no leak report. That is a missing measurement, not a")
+		fmt.Println("clean result.")
 		return
 	}
 	if rep.Empty() {

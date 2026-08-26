@@ -62,6 +62,9 @@ func (b *Backend) logExists(ctx context.Context) bool {
 }
 
 func (b *Backend) ifconfig(ctx context.Context, args ...string) (string, error) {
+	if b.exec != nil {
+		return b.exec(ctx, ifconfigPath, nil, args...)
+	}
 	cmd := exec.CommandContext(ctx, ifconfigPath, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {

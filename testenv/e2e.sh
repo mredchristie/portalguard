@@ -87,6 +87,26 @@ say "PRECONDITIONS"
 [ "$(id -u)" -eq 0 ] || { echo "must run as root: sudo $0"; exit 64; }
 [ -x "$BIN" ] || { echo "$BIN not built. run: make build"; exit 64; }
 
+# Refuse to test a stale binary.
+#
+# This is not fussiness: an e2e that silently validates an old build is worse
+# than no e2e, because it reports green for code that was never run. It has
+# happened - a whole leak-report feature was "tested" by a binary compiled
+# before the feature existed, and every assertion about it failed for a reason
+# that had nothing to do with the code.
+#
+# Refusing rather than rebuilding is deliberate: this script runs under sudo,
+# so building here would leave root-owned artefacts in bin/ and break the next
+# ordinary `make build`.
+stale=$(find cmd internal -name '*.go' -newer "$BIN" 2>/dev/null | head -3)
+if [ -n "$stale" ]; then
+    echo "$BIN is older than the sources:"
+    echo "$stale" | sed 's/^/    /'
+    echo "run 'make build' first (as yourself, not root), then re-run this."
+    exit 64
+fi
+printf '   binary is current\n'
+
 if [ -z "$GATEWAY" ]; then
     GATEWAY=$(route -n get default 2>/dev/null | awk '/gateway/{print $2}')
 fi

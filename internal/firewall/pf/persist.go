@@ -21,7 +21,9 @@ import (
 // /var/run is the right home precisely because it is cleared on reboot, which
 // matches the anchor's own lifetime: nothing portalguard does survives a
 // restart.
-const tokenPath = "/var/run/portalguard.pf-token"
+// It is a var rather than a const so tests can redirect it; nothing else
+// should reassign it.
+var tokenPath = "/var/run/portalguard.pf-token"
 
 // saveToken records the enable token for other invocations to release.
 func saveToken(token string) error {

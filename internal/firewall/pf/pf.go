@@ -78,7 +78,19 @@ type Backend struct {
 
 	// resolvers records who the DNS hole pointed at, for the report.
 	resolvers []net.IP
+
+	// exec, when set, replaces the real pfctl and ifconfig invocations.
+	//
+	// It exists so the rule-programming sequence can be tested without root
+	// and without touching the machine's networking. The counter accumulation
+	// in particular is only correct across a whole Lockdown/AllowHost/Seal
+	// sequence, which is not something a unit test of any single function can
+	// establish.
+	exec commandRunner
 }
+
+// commandRunner is the shape of a privileged command invocation.
+type commandRunner func(ctx context.Context, path string, stdin []byte, args ...string) (string, error)
 
 // New returns the macOS pf backend.
 func New() *Backend {
@@ -266,6 +278,9 @@ func (b *Backend) pfctl(ctx context.Context, args ...string) (string, error) {
 // pfctlStdin runs pfctl with the given stdin, used to load anchor rules with
 // `-f -` so we never write a ruleset to disk.
 func (b *Backend) pfctlStdin(ctx context.Context, stdin []byte, args ...string) (string, error) {
+	if b.exec != nil {
+		return b.exec(ctx, pfctlPath, stdin, args...)
+	}
 	cmd := exec.CommandContext(ctx, pfctlPath, args...)
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)

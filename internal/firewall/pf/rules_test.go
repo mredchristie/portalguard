@@ -240,3 +240,44 @@ func TestGapFromHostsSeparatesResolvers(t *testing.T) {
 		}
 	}
 }
+
+// TestGapRulesLoadedIsDecidedByRulesNotTables guards the invariant that a
+// sealed machine can never report an open address.
+//
+// pf tables are declared `persist`, so they outlive a ruleset that no longer
+// references them. Inferring the phase from table contents therefore reported
+// GAP over a machine that was fully blocked - and a UI reading that would have
+// shown the portal as still permitted after the seal closed it.
+func TestGapRulesLoadedIsDecidedByRulesNotTables(t *testing.T) {
+	// What `pfctl -s rules` prints for a bare lockdown: no reference to the
+	// gap tables, whatever the tables happen to still contain.
+	lockdown := `pass quick on lo0 all
+pass out quick inet proto udp from any port = 68 to any port = 67 no state
+block drop out quick all
+block drop in quick all`
+
+	if gapRulesLoaded(lockdown) {
+		t.Error("a lockdown ruleset must never be read as an open gap, even with populated tables")
+	}
+
+	gapLoaded := lockdown + `
+pass out quick inet proto tcp from any to <pg_portal> port = 80 keep state
+pass out log (all, user) quick inet proto { tcp udp } from any to <pg_dns> port = 53 keep state`
+
+	if !gapRulesLoaded(gapLoaded) {
+		t.Error("a ruleset with gap pass rules must be read as an open gap")
+	}
+}
+
+func TestGapRulesLoadedIgnoresNonPassLines(t *testing.T) {
+	// A comment or a block rule mentioning a table must not count as
+	// permission.
+	for _, rules := range []string{
+		"# the gap: <pg_portal> is empty here",
+		"block drop out quick inet proto tcp from any to <pg_portal>",
+	} {
+		if gapRulesLoaded(rules) {
+			t.Errorf("must not read permission from %q", rules)
+		}
+	}
+}

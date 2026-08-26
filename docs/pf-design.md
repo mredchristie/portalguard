@@ -315,13 +315,67 @@ could point its own name anywhere it liked after we opened the hole.
 
 ### Seal
 
-Seal reloads the LOCKED_DOWN ruleset, dropping the tables and the pass rules.
-That closes the hole for new connections, but existing states created while
-the gap was open would survive a rule change, so it also kills them:
+Seal reloads the LOCKED_DOWN ruleset, which drops the pass rules. That closes
+the hole for new connections — but it does not, on its own, drop the tables or
+the existing states, and both of those need handling explicitly.
+
+Existing states created while the gap was open survive a rule change, so seal
+kills them:
 
 ```fish
 sudo pfctl -k 0.0.0.0/0 -k <addr>   # once per address, see below
 ```
+
+Then it empties the tables:
+
+```fish
+sudo pfctl -a portalguard -F Tables
+```
+
+**This is not optional, and leaving it out was a real bug.** pf tables are
+declared `persist`, which means they survive a ruleset that no longer
+references them. Reloading the lockdown ruleset removes the pass rules but
+leaves `<pg_portal>` holding the portal's address — permission revoked, record
+retained. An end-to-end run caught it: `pg_portal` still held the gateway after
+the seal.
+
+Two behaviours were possible and the choice matters, so it is recorded here:
+
+- **(a) Seal flushes the tables.** Table contents then mean exactly one thing —
+  the set of addresses currently permitted — at every point in the lifecycle.
+- **(b) Tables persist to release as a record of what was pinned.** Then
+  "what is in the table" and "what is permitted" are different questions with
+  different answers, and every consumer has to know which one it is asking.
+
+**(a) is correct**, for a reason that is not just tidiness: nothing needs the
+record. Seal's own state kills read the addresses out before flushing, and a
+re-opened gap re-pins from a fresh detection. (b) would keep a second source of
+truth alive with no consumer, and the first thing to read it — a menu bar UI
+showing "currently allowed" — would render a sealed machine as still letting
+the portal through.
+
+### The tables are never the source of truth
+
+Flushing at seal fixes the case we hit. It does not fix the class, because a
+crash between the ruleset reload and the flush would leave the same residue,
+and so would anyone running `pfctl -T add` by hand.
+
+So the invariant is enforced where it cannot be skipped: **phase is derived
+from the rules, never from the tables, and the allow-list is reported only when
+the rules actually reference them.**
+
+```go
+// permitted  ⟺  a pass rule references the table
+// reported   ⟺  permitted
+```
+
+Rules are the only thing that filters packets, so they are the only honest
+answer to "is anything permitted". A populated table with no rule pointing at
+it permits nothing, and `status` now says so — it reports the phase as
+`LOCKED`, reports nothing as allowed, and adds a note that there is residue to
+clear. That holds however the residue got there.
+
+### Killing the states
 
 **"Once per pinned address" means the full contents of `<pg_portal>` and
 `<pg_dns>` at seal time, not just the IP detection originally found.** If the

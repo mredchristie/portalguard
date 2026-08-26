@@ -176,6 +176,21 @@ say "PHASE B3 -- SEALED closes the gap again"
 blocked   "http://$GATEWAY/"        "gateway blocked again after seal"
 reachable "$PORTAL/status"          "loopback still works while sealed"
 table_empty pg_portal               "pg_portal emptied by the seal"
+table_empty pg_dns                  "pg_dns emptied by the seal"
+
+# The invariant that matters for the UI: status must never report an address
+# as open when no pass rule permits it.
+phase=$("$BIN" status --json 2>/dev/null | sed -n 's/.*"phase"[^"]*"\([^"]*\)".*/\1/p')
+if [ "$phase" = "GAP" ]; then
+    bad "status reports GAP after seal -- nothing is permitted at this point"
+else
+    pass "status reports $phase after seal, not GAP"
+fi
+if "$BIN" status --json 2>/dev/null | grep -q '"allowed"'; then
+    bad "status still lists allowed hosts after seal"
+else
+    pass "status lists nothing as allowed after seal"
+fi
 
 say "PHASE C -- release restores the machine"
 cmd "$BIN" release >/dev/null || bad "release failed"

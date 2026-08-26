@@ -71,10 +71,34 @@ func (b *Backend) syncFromKernel(ctx context.Context) {
 	}
 
 	// Rules are loaded, so we are at least locked down. Whether the gap is
-	// open is decided by the tables, not by the rule text: an empty pg_portal
-	// with gap rules loaded still lets nothing through.
+	// open is decided by the *rules*, never by the tables.
+	//
+	// Deciding it from table contents was a real bug: pf tables are declared
+	// `persist`, so they outlive a ruleset that no longer mentions them. After
+	// a seal the lockdown ruleset is loaded and permits nothing, but the table
+	// still holds the addresses the gap had pinned - and inferring the phase
+	// from that reported GAP over a machine that was fully blocked.
+	//
+	// Rules are the only thing that actually filters packets, so they are the
+	// only honest source for "is anything permitted".
 	b.phase = firewall.PhaseLocked
-	if len(b.tableAddrs(ctx, portalTable)) > 0 || len(b.tableAddrs(ctx, dnsTable)) > 0 {
+	if gapRulesLoaded(out) {
 		b.phase = firewall.PhaseGap
 	}
+}
+
+// gapRulesLoaded reports whether the loaded ruleset contains a pass rule
+// referring to one of the gap tables. A table with addresses in it permits
+// nothing unless a rule points at it.
+func gapRulesLoaded(rules string) bool {
+	for _, line := range strings.Split(rules, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "pass") {
+			continue
+		}
+		if strings.Contains(line, "<"+portalTable+">") || strings.Contains(line, "<"+dnsTable+">") {
+			return true
+		}
+	}
+	return false
 }

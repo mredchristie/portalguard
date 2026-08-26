@@ -111,6 +111,19 @@ func (b *Backend) Seal(ctx context.Context) error {
 	}
 	b.phase = firewall.PhaseLocked
 	b.allowed = nil
+
+	// Empty the tables now that their addresses have been read out above.
+	//
+	// pf tables are declared `persist`, so they survive a ruleset that no
+	// longer references them. Leaving them populated would mean the pinned
+	// addresses outlive the permission they represented, which is exactly the
+	// mismatch a UI reading the tables would render as "still open".
+	if _, err := b.pfctl(ctx, "-a", AnchorName, "-F", "Tables"); err != nil {
+		if !isMissingAnchor(err) {
+			return fmt.Errorf("seal: flush tables: %w", err)
+		}
+	}
+
 	if err := b.destroyLogInterface(ctx); err != nil {
 		b.logNote = err.Error()
 	}

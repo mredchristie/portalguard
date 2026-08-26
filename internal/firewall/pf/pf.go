@@ -172,13 +172,58 @@ func (b *Backend) Status(ctx context.Context) (firewall.Status, error) {
 	rules := strings.TrimSpace(out)
 	st.Managed = rules != ""
 	st.Detail = rules
-	if b.logNote != "" {
-		st.Detail = b.logNote + "\n" + st.Detail
-	}
 	if !st.Managed {
 		st.Phase = firewall.PhaseOff
 	}
+
+	// The allow-list is read back from the kernel, and only when the rules
+	// actually reference the tables.
+	//
+	// This is the invariant that matters for anything rendering a UI: an
+	// address may only be shown as open if a pass rule permits it. Reporting
+	// table contents unconditionally would show a sealed machine as still
+	// letting the portal through, because `persist` tables outlive the rules
+	// that referenced them.
+	st.Allowed = nil
+	if st.Phase == firewall.PhaseGap {
+		st.Allowed = b.allowedFromKernel(ctx)
+	} else if residue := b.openAddrsLocked(ctx); len(residue) > 0 {
+		// Not reachable through any rule, but worth saying out loud: it means
+		// a teardown did not finish, and `pfctl -a portalguard -F Tables`
+		// will clear it.
+		st.Detail = fmt.Sprintf(
+			"note: %d address(es) left in the gap tables with no rule permitting them (residue from an interrupted teardown; harmless, clear with `pfctl -a %s -F Tables`)\n%s",
+			len(residue), AnchorName, st.Detail)
+	}
+
+	if b.logNote != "" {
+		st.Detail = b.logNote + "\n" + st.Detail
+	}
 	return st, nil
+}
+
+// allowedFromKernel rebuilds the allow-list from the pf tables. Called only
+// when the gap rules are loaded, so everything it returns is genuinely
+// permitted.
+func (b *Backend) allowedFromKernel(ctx context.Context) []firewall.Host {
+	var out []firewall.Host
+	if addrs := b.tableAddrs(ctx, portalTable); len(addrs) > 0 {
+		out = append(out, firewall.Host{
+			Name:   "portal",
+			Addrs:  addrs,
+			Reason: "captive portal login page",
+		})
+	}
+	if addrs := b.tableAddrs(ctx, dnsTable); len(addrs) > 0 {
+		out = append(out, firewall.Host{
+			Name:       "resolvers",
+			Addrs:      addrs,
+			Ports:      []int{53},
+			AllowDNSTo: true,
+			Reason:     "the portal login flow needs to resolve its own hostname",
+		})
+	}
+	return out
 }
 
 // availableLocked is Available without re-taking the mutex.

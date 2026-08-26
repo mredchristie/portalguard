@@ -356,35 +356,77 @@ harmless once the rules are gone. The hand-typed rescue command below does use
 `-F all`, because a human typing it at 2am wants maximum effect and does not
 want to remember two flags.
 
-### Still to verify, with sudo, before this is trusted
+### Verified on real hardware
 
-**Step 0, before anything else: have the exit plan in your hand.** Step 3 cuts
-your network on purpose. The difference between a ten-second test and a
-confused twenty minutes is whether the way out is already proven and already
-typed.
+Run against macOS 25.6 on the development machine. All of it passed; what was
+learned is recorded below.
+
+The sequence, in the order it was run:
 
 ```fish
-make rescue    # against an empty anchor, right now, before step 1
+make rescue                             # step 0: prove the way out first
+sudo portalguard install-anchor
+sudo pfctl -sr                          # anchor line present in the main ruleset
+portalguard print-rules -phase locked | sudo pfctl -a portalguard -n -f -
+portalguard print-rules -phase gap    | sudo pfctl -a portalguard -n -f -
+sudo pfctl -a portalguard -f - < locked.conf
+sudo pfctl -a portalguard -s rules      # rules really loaded
+curl -m 5 http://example.com            # timed out at the TCP layer, as designed
+make rescue                             # network restored
 ```
 
-It should print the flush and succeed against an anchor that has nothing in
-it. That confirms the command, the sudo prompt and the anchor name are all
-correct while you still have a working network to fix them on. Leave this
-document or the terminal history open on your phone before step 3.
+Both phases parse, LOCKED_DOWN loads and genuinely blocks — `curl` timed out at
+the TCP layer rather than failing at DNS, which is the right shape: the block
+rule is dropping packets, not merely breaking name resolution. `make rescue`
+restored networking.
 
-Then, in this order:
+#### IPv6 rules against IPv4-only tables are fine
 
-1. `sudo pfctl -sr` — confirm the anchor line appears in the main ruleset
-   after install.
-2. `sudo pfctl -a portalguard -n -f -` with each ruleset — parse only, loads
-   nothing. Confirms in particular that an `inet6` rule referring to a table
-   holding only IPv4 addresses is accepted rather than rejected at load.
-3. `sudo pfctl -a portalguard -f -` with the LOCKED_DOWN ruleset, then
-   immediately `sudo pfctl -a portalguard -s rules` to confirm it is really
-   there, and `make rescue` to get back out.
+The open question is closed. **pf accepts an `inet6` rule referencing a table
+that holds only IPv4 addresses.** Tables are evaluated at match time, so the
+rule simply never matches until a v6 address appears in the table.
 
-Step 3 is the first command in this whole project that can take your network
-away. Everything before it is inspection or parsing.
+No conditional emission is needed, and `render` can keep emitting both address
+families unconditionally. That is worth keeping rather than "optimising" away:
+it makes the ruleset one fixed shape regardless of what detection found, which
+is what makes the tests in `rules_test.go` mean anything.
+
+#### pf reorders rules on load
+
+**The generated text is not what ends up in the kernel.** pf normalises and
+reorders rules as it loads them, so the output of
+
+```fish
+sudo pfctl -a portalguard -s rules
+```
+
+is the authoritative answer to "what is actually being enforced", and the
+generator's output is only the request.
+
+This does not bite today, because the current ruleset is a set of `quick` rules
+with disjoint match criteria: exactly one can match any given packet, so the
+order they end up in cannot change the outcome. It would bite the moment we add
+two rules that can both match the same packet — say a broad `pass` and a
+narrower `block` over the same addresses. At that point the reviewed reading
+order in this document would stop describing what the kernel does.
+
+If that day comes, the rule is: express precedence through match criteria, not
+through position, and assert on `-s rules` output rather than on the generated
+text.
+
+#### The `-f` warning is expected
+
+Every load prints:
+
+```
+Use of -f option, could result in flushing of rules
+present in the main ruleset added by the program,
+e.g. portmap or SecurityAgent
+```
+
+This is not an error and does not indicate anything went wrong. pfctl prints it
+on any `-f`, including an anchor-scoped one that cannot touch the main ruleset.
+It is noted in the README so it is not mistaken for a failure.
 
 ---
 

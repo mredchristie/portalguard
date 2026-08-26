@@ -30,10 +30,13 @@ around that moment.
 
 ## Status
 
-v0.1, in progress. Detection and the state machine work; the macOS pf backend
-is scaffolded, with rule programming held behind a review of the ruleset
-(see `docs/pf-design.md`). Linux and Windows are stubs with their designs
-recorded but no implementation.
+v0.1, in progress. Detection and the state machine work. The macOS pf backend
+is implemented and verified on real hardware: both rulesets parse, `LOCKED_DOWN`
+loads and genuinely blocks, and `make rescue` restores networking. Still to
+come in v0.1 — the full `LOCKED_DOWN → GAP_OPEN → AUTHENTICATED → SEALED` cycle
+driven end to end against the test portal, and the `pflog0` reader behind the
+DNS leak log. Linux and Windows are stubs with their designs recorded but no
+implementation.
 
 ## Quick start
 
@@ -185,6 +188,23 @@ Two honest limitations, both in [`docs/pf-design.md`](docs/pf-design.md):
 - **The handoff window is not closed yet.** `HANDED_OFF` releases our rules and
   then you bring the VPN up, which leaves a brief unprotected moment — a
   smaller version of the problem this tool exists to solve.
+
+## A warning you can ignore
+
+Every rule load prints this, and it is not an error:
+
+```
+Use of -f option, could result in flushing of rules
+present in the main ruleset added by the program,
+e.g. portmap or SecurityAgent
+```
+
+pfctl prints it on any `-f`, including the anchor-scoped loads Portalguard uses,
+which cannot touch the main ruleset at all. Nothing has gone wrong.
+
+One related thing worth knowing: **pf reorders rules as it loads them**, so
+`sudo pfctl -a portalguard -s rules` is the authoritative account of what is
+being enforced. The generated text is only the request.
 
 ## Failing safe
 

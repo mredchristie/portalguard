@@ -10,9 +10,50 @@ import (
 
 	"github.com/mredchristie/portalguard/internal/firewall"
 	"github.com/mredchristie/portalguard/internal/firewall/backend"
+	"github.com/mredchristie/portalguard/internal/netinfo"
 	"github.com/mredchristie/portalguard/internal/portal"
 	"github.com/mredchristie/portalguard/internal/state"
 )
+
+// checkNoActiveVPN refuses to engage the firewall while a VPN owns the default
+// route.
+//
+// A VPN kill switch works the same way our lockdown does - block everything,
+// permit the tunnel - and two tools independently asserting "block everything
+// except my thing" over one interface produce whatever the rule ordering
+// happens to give. That is not something to debug live on a hotel network.
+//
+// portalguard is designed to run *before* the VPN, not beside it: lock down,
+// open the gap, log in, seal, then the VPN comes up and our rules are gone.
+// There is no phase where both are meant to be enforcing.
+//
+// The override exists because a hard refusal would punish anyone whose VPN
+// this misreads. It is opt-in and loud.
+func checkNoActiveVPN(ctx context.Context, override bool) error {
+	tun, err := netinfo.ActiveTunnel(ctx)
+	if err != nil || tun == nil {
+		return nil
+	}
+	if override {
+		logf("WARNING: %s is up and carrying the default route", tun)
+		logf("WARNING: proceeding anyway because --allow-active-vpn was given;")
+		logf("WARNING: if the VPN has a kill switch, its rules and ours will fight")
+		return nil
+	}
+	return fmt.Errorf(`%s is up and carrying the default route (gateway %s).
+
+A VPN kill switch and portalguard's lockdown will fight over pf rules.
+portalguard is meant to run before the VPN, not beside it.
+
+Disconnect the VPN first, then re-run.
+To override anyway: --allow-active-vpn`, tun, tun.Gateway)
+}
+
+// vpnFlag registers the override on a command's flag set.
+func vpnFlag(fs *flag.FlagSet) *bool {
+	return fs.Bool("allow-active-vpn", false,
+		"engage the firewall even though a VPN owns the default route (its kill switch may fight ours)")
+}
 
 // logf is the CLI's logger: plain lines on stderr so stdout stays parseable.
 func logf(format string, args ...any) {
@@ -71,6 +112,16 @@ func indent(s, prefix string) string {
 // runLockdown blocks everything. It deliberately does not detect first: the
 // user may want to lock down before they know what they are dealing with.
 func runLockdown(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("lockdown", flag.ContinueOnError)
+	allowVPN := vpnFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return exitUsageError
+	}
+	// The VPN check comes before the root check on purpose: it is the more
+	// informative failure, and it is actionable without sudo.
+	if err := checkNoActiveVPN(ctx, *allowVPN); err != nil {
+		return fail(err)
+	}
 	if err := requireRoot("lockdown"); err != nil {
 		return fail(err)
 	}
@@ -79,7 +130,7 @@ func runLockdown(ctx context.Context, args []string) int {
 		return fail(fmt.Errorf("%s backend unavailable: %s", fw.Name(), why))
 	}
 	if err := fw.Lockdown(ctx); err != nil {
-		return fail(notImplementedHint(err))
+		return fail(hint(err))
 	}
 	logf("all traffic blocked. run `sudo portalguard release` to undo")
 	return exitOK
@@ -92,7 +143,7 @@ func runSeal(ctx context.Context, args []string) int {
 	}
 	fw := backend.New()
 	if err := fw.Seal(ctx); err != nil {
-		return fail(notImplementedHint(err))
+		return fail(hint(err))
 	}
 	logf("gap closed; traffic is still blocked. bring up your VPN, then `sudo portalguard release`")
 	return exitOK
@@ -129,8 +180,14 @@ flags:
 		fs.PrintDefaults()
 	}
 	build := proberFlags(fs)
+	allowVPN := vpnFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return exitUsageError
+	}
+	// The VPN check comes before the root check on purpose: it is the more
+	// informative failure, and it is actionable without sudo.
+	if err := checkNoActiveVPN(ctx, *allowVPN); err != nil {
+		return fail(err)
 	}
 	if err := requireRoot("allow"); err != nil {
 		return fail(err)
@@ -149,7 +206,7 @@ flags:
 
 	if fs.NArg() > 0 {
 		if err := sess.AllowExtra(ctx, fs.Arg(0)); err != nil {
-			return fail(notImplementedHint(err))
+			return fail(hint(err))
 		}
 		return exitOK
 	}
@@ -163,10 +220,10 @@ flags:
 		return classExit(res.Class)
 	}
 	if err := sess.Lockdown(ctx); err != nil {
-		return fail(notImplementedHint(err))
+		return fail(hint(err))
 	}
 	if err := sess.OpenGap(ctx); err != nil {
-		return fail(notImplementedHint(err))
+		return fail(hint(err))
 	}
 	fmt.Printf("gap open. log in yourself at: %s\n", res.PortalURL)
 	return exitOK
@@ -190,8 +247,14 @@ flags:
 	build := proberFlags(fs)
 	wait := fs.Duration("wait", 10*time.Minute, "how long to wait for you to finish logging in")
 	poll := fs.Duration("poll", 3*time.Second, "how often to re-probe while waiting")
+	allowVPN := vpnFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return exitUsageError
+	}
+	// The VPN check comes before the root check on purpose: it is the more
+	// informative failure, and it is actionable without sudo.
+	if err := checkNoActiveVPN(ctx, *allowVPN); err != nil {
+		return fail(err)
 	}
 	if err := requireRoot("run"); err != nil {
 		return fail(err)
@@ -253,7 +316,7 @@ flags:
 		return nil
 	})
 	if err != nil {
-		return fail(notImplementedHint(err))
+		return fail(hint(err))
 	}
 	return exitOK
 }

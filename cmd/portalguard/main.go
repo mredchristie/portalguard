@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 )
 
@@ -44,6 +43,9 @@ func commands() []command {
 		{"seal", "close the gap, leaving the lockdown in place (root)", runSeal},
 		{"release", "tear down all portalguard rules and restore networking (root)", runRelease},
 		{"run", "the whole flow: detect, lock down, open the gap, wait, seal (root)", runFlow},
+		{"print-rules", "print the pf ruleset without loading it", runPrintRules},
+		{"install-anchor", "add the portalguard anchor point to /etc/pf.conf (root, once)", runInstallAnchor},
+		{"uninstall-anchor", "remove it again (root)", runUninstallAnchor},
 		{"version", "print the version", runVersion},
 	}
 }
@@ -89,7 +91,7 @@ usage: portalguard <command> [flags]
 commands:
 `, version)
 	for _, c := range commands() {
-		fmt.Fprintf(w, "  %-9s %s\n", c.name, c.summary)
+		fmt.Fprintf(w, "  %-17s %s\n", c.name, c.summary)
 	}
 	fmt.Fprint(w, `
 Commands marked (root) program the packet filter and must be run with sudo.
@@ -121,13 +123,14 @@ func requireRoot(cmd string) error {
 	return fmt.Errorf("`portalguard %s` programs the packet filter and needs root: try `sudo portalguard %s`", cmd, cmd)
 }
 
-// notImplementedHint recognises the pending-pf-review error and explains it.
-func notImplementedHint(err error) error {
+// hint adds an actionable next step to the errors a user is most likely to
+// hit, rather than leaving them with a bare pfctl failure.
+func hint(err error) error {
 	if err == nil {
 		return nil
 	}
-	if strings.Contains(err.Error(), "pending ruleset review") {
-		return errors.New("the pf rule programming is not switched on yet; see docs/pf-design.md")
+	if errors.Is(err, pfNoAnchorHook()) {
+		return fmt.Errorf("%w\n\nWhy this matters: rules loaded into an unreferenced anchor are stored\nand never evaluated, so portalguard would report LOCKED_DOWN over a wide\nopen network. It refuses rather than pretend.", err)
 	}
 	return err
 }

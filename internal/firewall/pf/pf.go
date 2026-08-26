@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -36,9 +37,14 @@ const AnchorName = "portalguard"
 // privileged command.
 const pfctlPath = "/sbin/pfctl"
 
-// errPendingReview marks the rule-programming calls that are intentionally
-// inert until the anchor ruleset has been reviewed. See docs/pf-design.md.
-var errPendingReview = errors.New("pf: rule programming not enabled yet (pending ruleset review)")
+// ErrNoAnchorHook means rules would load successfully and filter nothing,
+// because the main ruleset has no `anchor "portalguard"` line to reach them
+// through. This is the one failure that must never be papered over: it would
+// leave portalguard reporting LOCKED_DOWN over a wide open network.
+var ErrNoAnchorHook = errors.New(`pf: /etc/pf.conf has no anchor "portalguard" line, so portalguard's rules would load but never be evaluated; run: sudo portalguard install-anchor`)
+
+// tokenRe extracts the reference token from `pfctl -E` output.
+var tokenRe = regexp.MustCompile(`(?i)token\s*:\s*(\d+)`)
 
 // Backend programs pf via pfctl.
 type Backend struct {
@@ -74,10 +80,6 @@ func (b *Backend) Available(ctx context.Context) (bool, string) {
 	return true, ""
 }
 
-func (b *Backend) Lockdown(context.Context) error                 { return errPendingReview }
-func (b *Backend) AllowHost(context.Context, firewall.Host) error { return errPendingReview }
-func (b *Backend) Seal(context.Context) error                     { return errPendingReview }
-
 // Release empties the Portalguard anchor and drops our pf enable reference.
 // It is safe to run at any time, including when nothing was ever installed,
 // and it is the manual escape hatch behind `sudo portalguard release`.
@@ -87,11 +89,19 @@ func (b *Backend) Release(ctx context.Context) error {
 
 	var errs []error
 
-	// -F all empties rules, states and tables belonging to the anchor only.
-	if _, err := b.pfctl(ctx, "-a", AnchorName, "-F", "all"); err != nil {
-		// A missing anchor is not a failure: there was nothing to undo.
-		if !isMissingAnchor(err) {
-			errs = append(errs, fmt.Errorf("flush anchor: %w", err))
+	// Flush our rules and our tables, both scoped to the anchor. Deliberately
+	// not -F all, which would take the state table with it and drop every TCP
+	// connection on the machine - a rude surprise when all that was asked for
+	// was the network back. Stale states are harmless once the rules are gone.
+	//
+	// The hand-typed rescue command (`make rescue`) does use -F all, because a
+	// human typing it wants maximum effect and one flag to remember.
+	for _, what := range []string{"rules", "Tables"} {
+		if _, err := b.pfctl(ctx, "-a", AnchorName, "-F", what); err != nil {
+			// A missing anchor is not a failure: there was nothing to undo.
+			if !isMissingAnchor(err) {
+				errs = append(errs, fmt.Errorf("flush anchor %s: %w", what, err))
+			}
 		}
 	}
 

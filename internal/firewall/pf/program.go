@@ -39,6 +39,11 @@ func (b *Backend) Lockdown(ctx context.Context) error {
 	b.phase = firewall.PhaseLocked
 	b.allowed = nil
 	b.since = time.Now()
+	// A fresh engagement gets a fresh account.
+	b.counters = tally{}
+	b.gapOpened = time.Time{}
+	b.gapClosed = time.Time{}
+	b.resolvers = nil
 	return nil
 }
 
@@ -75,7 +80,13 @@ func (b *Backend) AllowHost(ctx context.Context, h firewall.Host) error {
 		return err
 	}
 	b.allowed = next(b.allowed, h)
+	if b.phase != firewall.PhaseGap {
+		b.gapOpened = time.Now()
+	}
 	b.phase = firewall.PhaseGap
+	if h.AllowDNSTo {
+		b.resolvers = append(b.resolvers, h.Addrs...)
+	}
 	return nil
 }
 
@@ -111,6 +122,9 @@ func (b *Backend) Seal(ctx context.Context) error {
 	}
 	b.phase = firewall.PhaseLocked
 	b.allowed = nil
+	if b.gapClosed.IsZero() {
+		b.gapClosed = time.Now()
+	}
 
 	// Empty the tables now that their addresses have been read out above.
 	//
@@ -192,6 +206,12 @@ func (b *Backend) killStatesTo(ctx context.Context, ip net.IP) error {
 // loadLocked renders and loads an anchor ruleset from stdin, so no ruleset is
 // ever written to disk and nothing survives a reboot.
 func (b *Backend) loadLocked(ctx context.Context, g gap) error {
+	// pf resets per-rule statistics on reload, so the counts accumulated
+	// under the outgoing ruleset have to be banked before the new one lands.
+	// This is the single chokepoint for reloads, which is why it happens here
+	// rather than at each call site where it could be forgotten.
+	b.sampleCountersLocked(ctx)
+
 	rules := render(g)
 	if _, err := b.pfctlStdin(ctx, []byte(rules), "-a", AnchorName, "-f", "-"); err != nil {
 		return fmt.Errorf("load anchor ruleset: %w", err)

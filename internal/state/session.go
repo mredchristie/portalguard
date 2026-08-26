@@ -221,6 +221,21 @@ func (s *Session) Seal(ctx context.Context) error {
 	return err
 }
 
+// Report returns the backend's account of what it filtered, and whether the
+// backend could supply one at all.
+//
+// Not every backend can account for its own traffic, so this is an optional
+// capability rather than part of the Backend interface: a backend that cannot
+// is simply not a firewall.Reporter, instead of stubbing a method that would
+// have to return zeros indistinguishable from "nothing happened".
+func (s *Session) Report() (firewall.Report, bool) {
+	r, ok := s.fw.(firewall.Reporter)
+	if !ok {
+		return firewall.Report{}, false
+	}
+	return r.LeakReport(), true
+}
+
 // HandOff releases our rules so the user's VPN owns the connection.
 //
 // v0.1 does not start or verify the VPN: the user does that, and this call

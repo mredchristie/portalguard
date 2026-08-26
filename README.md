@@ -189,6 +189,32 @@ Two honest limitations, both in [`docs/pf-design.md`](docs/pf-design.md):
   then you bring the VPN up, which leaves a brief unprotected moment — a
   smaller version of the problem this tool exists to solve.
 
+## The leak report
+
+When the gap closes, Portalguard says what went through it:
+
+```
+The gap was open for 47s.
+Held back 412 packets (37.2 kB) your machine tried to send while locked down.
+Dropped 133 packets (9.6 kB) the network tried to send you.
+The login page itself accounted for 88 packets (20.9 kB).
+
+46 packets (4.8 kB) went out through the DNS hole, to 192.168.0.1.
+That is packets, not lookups: a query and its reply are counted separately.
+Which hostnames were asked for, and by which processes, is not known:
+that needs packet logging, which was not available for this run.
+```
+
+The numbers come from pf's own per-rule counters — no packet capture, nothing
+to install, nothing that can be unavailable.
+
+**The report never claims to know more than it does.** The DNS hole in
+`GAP_OPEN` is machine-wide, so background daemons do fire lookups through it,
+and the count above is real. What Portalguard cannot tell you from counters
+alone is *which* hostnames those were — so it says that, rather than showing an
+empty list that reads like an all-clear. Hostname and process detail is the
+`pflog` layer, still to come.
+
 ## A warning you can ignore
 
 Every rule load prints this, and it is not an error:

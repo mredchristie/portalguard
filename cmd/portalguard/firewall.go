@@ -230,6 +230,24 @@ flags:
 }
 
 // runFlow drives the whole sequence and blocks until the user has logged in.
+// printReport shows what the firewall accounted for, if the backend could
+// account for anything. Silence is better than a row of zeros that cannot be
+// told apart from a quiet network.
+func printReport(sess *state.Session) {
+	rep, ok := sess.Report()
+	if !ok {
+		return
+	}
+	if rep.Empty() {
+		fmt.Println("\nNo traffic was accounted for. That usually means the counters could not")
+		fmt.Println("be read, not that nothing happened.")
+		return
+	}
+	fmt.Println("\n--- what happened while portalguard was engaged ---")
+	fmt.Print(rep.String())
+	fmt.Println("---")
+}
+
 func runFlow(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.Usage = func() {
@@ -312,6 +330,9 @@ flags:
 			return err
 		}
 		fmt.Println("\nAuthenticated and sealed. Traffic is still blocked.")
+
+		printReport(sess)
+
 		fmt.Println("Bring up your VPN now, then run: sudo portalguard release")
 		return nil
 	})

@@ -778,6 +778,52 @@ stay exactly as reviewed — no `log` on them. Their packet counters already
 answer "how much was held back", and logging every dropped packet on a hostile
 network is a good way to fill a disk for no benefit.
 
+### What ships first: the counter report
+
+The counter layer is built and does not depend on any of the pflog machinery
+below. It is the layer that still works when pflog1 cannot be created, when
+BPF is unavailable, or on a machine where none of this has been set up.
+
+Two properties of pf's counters drove the implementation, and both are easy to
+get wrong:
+
+**Counters reset on every ruleset reload.** Portalguard reloads at each phase
+change, so lockdown's counts are destroyed the instant the gap ruleset lands.
+Reading the counters once at the end would report only what happened since the
+last reload, and would show zero packets blocked during lockdown — a
+comfortable, wrong answer. Totals are therefore sampled immediately *before*
+every reload and accumulated. The sampling lives inside the single function
+that reloads rules, rather than at each call site where it could be forgotten.
+
+**Counters are packets, not lookups.** `pfctl(8)`: "Packets passed statefully
+are counted in the rule that created the state" — so a DNS query and its reply
+both land on the DNS pass rule. The count is roughly twice the number of
+lookups, and the report says "packets, not lookups" rather than letting the
+number read as a query count.
+
+The report degrades in one direction only. With counters alone it says how much
+went through the DNS hole and states plainly that what was asked for is not
+known, and why. It never renders an absent hostname list as an absence of
+leaks:
+
+```
+The gap was open for 47s.
+Held back 412 packets (37.2 kB) your machine tried to send while locked down.
+
+46 packets (4.8 kB) went out through the DNS hole, to 192.168.0.1.
+That is packets, not lookups: a query and its reply are counted separately.
+Which hostnames were asked for, and by which processes, is not known:
+that needs packet logging, which was not available for this run.
+```
+
+When the pflog layer lands, the last two lines are replaced by the hostnames
+and processes, and nothing else about the report changes.
+
+`firewall.Reporter` is an optional interface rather than part of `Backend`, so
+a backend that cannot account for its own traffic is simply not a Reporter -
+instead of stubbing a method returning zeros that cannot be told apart from a
+quiet network. The CLI says so explicitly when a report comes back empty.
+
 ### Implementation shape
 
 `tcpdump` is at `/usr/sbin/tcpdump` and reads pflog natively — the pflog link

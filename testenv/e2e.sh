@@ -23,6 +23,7 @@ WAIT=${WAIT:-90}
 
 fail_count=0
 run_pid=""
+RUN_LOG=""
 
 say()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 cmd()  { printf '   $ %s\n' "$*"; "$@"; }
@@ -37,6 +38,7 @@ cleanup() {
         kill "$run_pid" 2>/dev/null
         wait "$run_pid" 2>/dev/null
     fi
+    [ -n "${RUN_LOG:-}" ] && rm -f "$RUN_LOG"
     cmd pfctl -a portalguard -F rules  >/dev/null 2>&1
     cmd pfctl -a portalguard -F Tables >/dev/null 2>&1
     ifconfig pflog1 >/dev/null 2>&1 && cmd ifconfig pflog1 destroy >/dev/null 2>&1
@@ -125,8 +127,9 @@ say "PHASE B -- the full cycle, driven by the real CLI"
 # portalguard run holds the state machine in one process, which is its natural
 # scope. We assert from outside while it waits in GAP_OPEN.
 
-printf '   $ %s run -probes-file %s -wait %ss &\n' "$BIN" "$PROBES" "$WAIT"
-"$BIN" run -probes-file "$PROBES" -wait "${WAIT}s" -poll 2s &
+RUN_LOG=$(mktemp -t portalguard-e2e)
+printf '   $ %s run -probes-file %s -wait %ss &   (output -> %s)\n' "$BIN" "$PROBES" "$WAIT" "$RUN_LOG"
+"$BIN" run -probes-file "$PROBES" -wait "${WAIT}s" -poll 2s >"$RUN_LOG" 2>&1 &
 run_pid=$!
 
 # Wait for the gap to open, by watching the kernel rather than the log output.
@@ -191,6 +194,47 @@ if "$BIN" status --json 2>/dev/null | grep -q '"allowed"'; then
 else
     pass "status lists nothing as allowed after seal"
 fi
+
+say "PHASE B4 -- the leak report is real"
+# A silently broken counter read would otherwise pass as "nothing leaked",
+# which is the most dangerous way for this to fail: a reassuring report is
+# worse than no report.
+if grep -q "what happened while portalguard was engaged" "$RUN_LOG"; then
+    pass "report was printed at seal"
+else
+    bad "no report printed at seal"
+    sed -n '1,40p' "$RUN_LOG" | sed 's/^/      | /'
+fi
+
+blocked_n=$(sed -n 's/^Held back \([0-9][0-9]*\) packets.*/\1/p' "$RUN_LOG" | head -1)
+if [ -n "$blocked_n" ] && [ "$blocked_n" -gt 0 ] 2>/dev/null; then
+    pass "report counted $blocked_n outbound packets held back (non-zero)"
+else
+    bad "report shows no packets held back -- counter read is broken, not a quiet network"
+fi
+
+if grep -q "packets, not lookups" "$RUN_LOG"; then
+    pass "report does not let a packet count read as a query count"
+else
+    bad "report is missing the packets-vs-lookups caveat"
+fi
+
+if grep -q "gap was open for" "$RUN_LOG"; then
+    pass "report states how long the gap was open"
+else
+    bad "report does not state the gap duration"
+fi
+
+# With no pflog enrichment yet, the report must say so rather than imply
+# that an absent hostname list means nothing was asked for.
+if grep -q "not known" "$RUN_LOG" || grep -q "Hostnames queried" "$RUN_LOG"; then
+    pass "report is explicit about whether it knows the hostnames"
+else
+    bad "report neither lists hostnames nor says they are unknown"
+fi
+
+printf '\n   --- report as printed ---\n'
+sed -n '/what happened while portalguard was engaged/,/^---$/p' "$RUN_LOG" | sed 's/^/   /'
 
 say "PHASE C -- release restores the machine"
 cmd "$BIN" release >/dev/null || bad "release failed"

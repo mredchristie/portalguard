@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"regexp"
@@ -65,6 +66,18 @@ type Backend struct {
 	// logNote carries a non-fatal problem with leak logging, surfaced in
 	// Status rather than failing the operation that hit it.
 	logNote string
+
+	// counters accumulate across every ruleset this process has loaded,
+	// because pf resets per-rule statistics on reload and we reload at every
+	// phase change.
+	counters tally
+
+	// gapOpened and gapClosed bound the window the report describes.
+	gapOpened time.Time
+	gapClosed time.Time
+
+	// resolvers records who the DNS hole pointed at, for the report.
+	resolvers []net.IP
 }
 
 // New returns the macOS pf backend.
@@ -96,6 +109,13 @@ func (b *Backend) Release(ctx context.Context) error {
 	defer b.mu.Unlock()
 
 	var errs []error
+
+	// Bank the counters before the flush destroys them. A run torn down
+	// without a seal - an abort, a signal, a panic - still gets a report.
+	b.sampleCountersLocked(ctx)
+	if b.phase == firewall.PhaseGap && b.gapClosed.IsZero() {
+		b.gapClosed = time.Now()
+	}
 
 	// Flush our rules and our tables, both scoped to the anchor. Deliberately
 	// not -F all, which would take the state table with it and drop every TCP

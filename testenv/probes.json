@@ -1,0 +1,12 @@
+[
+  {
+    "name": "testenv-apple",
+    "url": "http://127.0.0.1:8080/hotspot-detect.html",
+    "expect": "apple_success"
+  },
+  {
+    "name": "testenv-google",
+    "url": "http://127.0.0.1:8080/generate_204",
+    "expect": "no_content"
+  }
+]

@@ -1,0 +1,43 @@
+# A captive portal you can test against without going to a cafe.
+#
+#   PORTAL_IP=<your Mac's LAN IP> docker compose up --build
+#
+# PORTAL_IP is the address clients will be told to reach the portal on. For a
+# test confined to this Mac, 127.0.0.1 is fine. To point a phone or laptop at
+# it, use the Mac's LAN address (ipconfig getifaddr en0) so the redirect and
+# the DNS answers are reachable from the other device.
+#
+# See README.md in this directory for how to point a client at it.
+
+name: portalguard-testenv
+
+services:
+  portal:
+    build:
+      # The repo root, so the portal is built from the same Go module.
+      context: ..
+      dockerfile: testenv/portal-web/Dockerfile
+    environment:
+      # How the portal announces itself: redirect | interstitial | 511.
+      MODE: ${MODE:-redirect}
+      # Where clients are sent to log in. Must be reachable *from the client*,
+      # which is why it is built from PORTAL_IP rather than a container name.
+      PORTAL_URL: http://${PORTAL_IP:-127.0.0.1}:${PORTAL_PORT:-8080}/login
+    ports:
+      # Host 8080 -> container 80. Publishing 80 directly needs root on macOS.
+      - "${PORTAL_PORT:-8080}:80"
+    restart: unless-stopped
+
+  dns:
+    build:
+      context: dnsmasq
+    environment:
+      # Every name resolves here. Clients must be able to reach this address.
+      PORTAL_IP: ${PORTAL_IP:-127.0.0.1}
+    ports:
+      # 5353 by default: binding 53 needs root, and on macOS it collides with
+      # mDNSResponder. Use DNS_PORT=53 with a runtime that can bind it when you
+      # want to point a real device's DNS setting here.
+      - "${DNS_PORT:-5353}:53/udp"
+      - "${DNS_PORT:-5353}:53/tcp"
+    restart: unless-stopped

@@ -39,6 +39,9 @@ const (
 // found nothing more specific.
 var defaultPortalPorts = []int{80, 443}
 
+// ==== describing the hole =================================================
+// What to open, as addresses and ports. Zero value means a bare lockdown.
+
 // gap describes the hole to punch. The zero value renders a bare lockdown.
 type gap struct {
 	portalAddrs []net.IP
@@ -83,6 +86,10 @@ func gapFromHosts(hosts []firewall.Host) gap {
 	return g
 }
 
+// ==== the rules themselves ================================================
+// Loopback, DHCP, IPv6 neighbour discovery. The bare minimum to stay on
+// the network.
+
 // preamble is the part both phases share: what the machine needs to stay on
 // the link, and nothing else.
 const preamble = `# Loopback is never touched. Local IPC, the resolver stub, anything talking to
@@ -111,6 +118,9 @@ const blocks = `# Everything else, in and out, on every interface. block drop ra
 block drop out quick all
 block drop in  quick all
 `
+
+// ==== building the ruleset ================================================
+// Assembles the text pf is given. Passes first, block last.
 
 // render produces the anchor ruleset for a phase. An open gap renders the
 // tables and pass rules; a closed one renders a bare lockdown.
@@ -174,6 +184,9 @@ func (g gap) logClause() string {
 	}
 	return fmt.Sprintf("log (all, user, to %s)", g.logTo)
 }
+
+// ==== formatting bits =====================================================
+// Turning addresses and ports into pf syntax.
 
 // renderTable emits a pf table declaration. An empty table is declared without
 // a body: `persist` keeps it alive with no addresses, and a rule referring to

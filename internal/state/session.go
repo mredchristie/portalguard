@@ -19,6 +19,9 @@ import (
 // has not found one.
 var ErrNoPortal = errors.New("state: no captive portal detected yet")
 
+// ==== the session =========================================================
+// Ties detection and the firewall to the state machine.
+
 // Session drives one pass through the state machine, wiring detection and the
 // packet filter to the transitions.
 //
@@ -56,6 +59,9 @@ func (s *Session) Result() portal.Result {
 	defer s.mu.Unlock()
 	return s.last
 }
+
+// ==== the flow, in order ==================================================
+// Detect, lock down, open the gap, wait for login, seal, hand off.
 
 // Detect runs the probes and moves the machine to PortalFound or back to Idle.
 func (s *Session) Detect(ctx context.Context) (portal.Result, error) {
@@ -272,6 +278,9 @@ func (s *Session) Allowed() []firewall.Host {
 	defer s.mu.Unlock()
 	return append([]firewall.Host(nil), s.allowed...)
 }
+
+// ==== working out what to allow ===========================================
+// Turns a detection result into the smallest allowed-host list.
 
 // gapHosts turns a detection result into the minimal host list for the gap.
 func gapHosts(res portal.Result) ([]firewall.Host, error) {

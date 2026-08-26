@@ -28,6 +28,10 @@ func (t Tunnel) String() string {
 	return fmt.Sprintf("%s (%s)", t.Interface, t.Addr)
 }
 
+// ==== spotting a VPN ======================================================
+// A tunnel-shaped name is not enough - macOS keeps several addressless
+// utuns up at all times.
+
 // tunnelPrefixes are the interface name prefixes used by VPN software on the
 // platforms we care about.
 var tunnelPrefixes = []string{"utun", "ipsec", "ppp", "tun", "tap", "gpd", "wg"}

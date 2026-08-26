@@ -12,6 +12,9 @@ import (
 	"portalguard/internal/portal"
 )
 
+// ==== probe flags =========================================================
+// Lets -probe and -probes-file override the default endpoints.
+
 // probeList collects repeated -probe flags.
 type probeList []portal.Probe
 
@@ -124,6 +127,9 @@ func loadProbes(path string) ([]portal.Probe, error) {
 	return probes, nil
 }
 
+// ==== the detect command ==================================================
+// Read-only. Probes the network, prints the verdict, exits 0/10/20.
+
 func runDetect(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("detect", flag.ContinueOnError)
 	fs.Usage = func() {
@@ -175,6 +181,9 @@ func classExit(c portal.Classification) int {
 		return exitNoNetwork
 	}
 }
+
+// ==== output ==============================================================
+// Human-readable rendering. -json gives the whole structure instead.
 
 func printResult(res portal.Result, verbose bool) {
 	fmt.Printf("%s  %s\n", res.Class, res.Summary())

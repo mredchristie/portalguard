@@ -31,6 +31,9 @@ import (
 //     state" (pfctl(8)), so a DNS query and its reply both land on the DNS
 //     pass rule. The number is packets, not lookups, and the report says so.
 
+// ==== parsing pfctl output ================================================
+// Pull packets and bytes out of the stats line under each rule.
+
 // counterRe matches the statistics line pfctl prints under each rule.
 var counterRe = regexp.MustCompile(
 	`\[\s*Evaluations:\s*(\d+)\s+Packets:\s*(\d+)\s+Bytes:\s*(\d+)`)
@@ -82,6 +85,9 @@ var ruleNumRe = regexp.MustCompile(`^@\d+\s+`)
 func stripRuleNumber(line string) string {
 	return ruleNumRe.ReplaceAllString(line, "")
 }
+
+// ==== adding it up ========================================================
+// pf resets counters on reload, so bank them before every reload.
 
 // tally is the running total across every ruleset this process has loaded.
 type tally struct {
@@ -165,6 +171,9 @@ func (b *Backend) sampleCountersLocked(ctx context.Context) {
 	}
 	b.counters.add(parseRuleCounters(out))
 }
+
+// ==== the report ==========================================================
+// Hand the totals out in the shape the CLI prints.
 
 // LeakReport returns what this process has accounted for since Lockdown.
 func (b *Backend) LeakReport() firewall.Report {

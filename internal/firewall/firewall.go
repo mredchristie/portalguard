@@ -28,6 +28,9 @@ var ErrNeedsPrivileges = errors.New("firewall: root privileges required")
 // ErrNotLocked is returned when a hole is requested before Lockdown.
 var ErrNotLocked = errors.New("firewall: not locked down")
 
+// ==== what the firewall is doing ==========================================
+// Coarser than the state machine - the firewall knows rules, not portals.
+
 // Phase describes what the backend believes it is currently enforcing. It is
 // deliberately coarser than the application state machine in internal/state:
 // the firewall only knows about rules, not about portals or VPNs.
@@ -44,6 +47,9 @@ const (
 	// portal hosts.
 	PhaseGap Phase = "GAP"
 )
+
+// ==== what we let through =================================================
+// A hole in the firewall. Pinned to addresses, never to a hostname.
 
 // Host is a destination Portalguard is willing to let through while the gap is
 // open. Hosts are always pinned to concrete addresses before a rule is written
@@ -93,6 +99,9 @@ type Status struct {
 	// Detail carries backend-specific text (e.g. the raw anchor dump).
 	Detail string `json:"detail,omitempty"`
 }
+
+// ==== the driver interface ================================================
+// What every OS backend provides. Release is the one that must not fail.
 
 // Backend is the per-OS packet filter driver.
 //

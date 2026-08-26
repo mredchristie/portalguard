@@ -32,6 +32,9 @@ type DNSCheck struct {
 	ProbeAddrs map[string][]string `json:"probe_addrs,omitempty"`
 }
 
+// ==== hijack detection ====================================================
+// Two tests: a name that cannot exist, and public names on private IPs.
+
 // checkDNS looks for two independent signs of a hijacked resolver:
 //
 //  1. A name that cannot exist resolves anyway. Anything under .invalid is
@@ -89,6 +92,9 @@ func (p *Prober) checkDNS(ctx context.Context, probes []Probe) DNSCheck {
 
 	return out
 }
+
+// ==== address checks ======================================================
+// Which address ranges a real public hostname should never resolve to.
 
 // isLocalAddr reports whether an address is one a public hostname should never
 // resolve to.

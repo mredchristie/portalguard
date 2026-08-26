@@ -15,6 +15,10 @@ import (
 	"time"
 )
 
+// ==== what a clean response looks like ====================================
+// Each probe has a known-good answer. Anything else means someone is
+// in the middle.
+
 // Expectation describes what an untampered response to a probe looks like.
 type Expectation string
 
@@ -60,6 +64,9 @@ const defaultUserAgent = "CaptiveNetworkSupport-455.1 wispr"
 // be large; we only need enough to recognise them and to spot a meta refresh.
 const maxBody = 64 << 10
 
+// ==== the prober ==========================================================
+// Config for a run: probe list, timeouts, which resolver to use.
+
 // Prober runs the probe list against the current network.
 //
 // The zero value is not usable; call NewProber.
@@ -87,6 +94,9 @@ func NewProber() *Prober {
 	}
 }
 
+// ==== results =============================================================
+// What one probe told us, kept per-probe so -v can show the working.
+
 // ProbeResult is what one probe endpoint told us.
 type ProbeResult struct {
 	Probe      Probe          `json:"probe"`
@@ -108,6 +118,9 @@ type ProbeResult struct {
 	// dnsErr records that the failure was specifically name resolution.
 	dnsErr bool
 }
+
+// ==== running the probes ==================================================
+// Fire every probe, then fold the answers into one verdict.
 
 // Detect runs every probe and returns a single verdict.
 func (p *Prober) Detect(ctx context.Context) Result {
@@ -296,6 +309,9 @@ func (p *Prober) client() *http.Client {
 	}
 }
 
+// ==== reading a single response ===========================================
+// Redirect, 511, meta-refresh, or the wrong body: all mean a portal.
+
 // classifyResponse turns one HTTP response into a per-probe verdict.
 func classifyResponse(out *ProbeResult, probe Probe, resp *http.Response, body []byte) {
 	// RFC 6585: the honest way for a portal to announce itself.
@@ -411,6 +427,9 @@ func absolute(resp *http.Response, loc string) string {
 	}
 	return loc
 }
+
+// ==== small helpers =======================================================
+// URL parsing and string tidying. Nothing clever here.
 
 // splitURL returns the host and effective port of a URL.
 func splitURL(raw string) (host string, port int, ok bool) {

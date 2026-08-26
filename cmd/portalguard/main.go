@@ -28,6 +28,9 @@ const (
 	exitUsageError = 64
 )
 
+// ==== the command table ===================================================
+// Every subcommand, its summary, and what runs it.
+
 type command struct {
 	name    string
 	summary string
@@ -49,6 +52,9 @@ func commands() []command {
 		{"version", "print the version", runVersion},
 	}
 }
+
+// ==== startup =============================================================
+// Parse the subcommand, set up Ctrl-C handling, dispatch.
 
 func main() {
 	os.Exit(run())
@@ -102,6 +108,9 @@ If portalguard is ever killed hard and your network stays blocked, run:
   sudo portalguard release
 `)
 }
+
+// ==== shared helpers ======================================================
+// Error printing, the root check, and hints for the errors people actually hit.
 
 func runVersion(context.Context, []string) int {
 	fmt.Println(version)

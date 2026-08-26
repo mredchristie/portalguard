@@ -32,6 +32,9 @@ type SafetyNet struct {
 	doneCh chan struct{}
 }
 
+// ==== catching the exits we can see =======================================
+// Signals and panics. Not kill -9 - that is what make rescue is for.
+
 // InstallSafetyNet starts watching for termination signals. The returned
 // SafetyNet must be stopped (usually with defer) once the caller no longer
 // wants automatic teardown.

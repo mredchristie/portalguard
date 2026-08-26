@@ -58,6 +58,10 @@ type Report struct {
 	Source string `json:"source,omitempty"`
 }
 
+// ==== reading the report ==================================================
+// Helpers for the numbers. Enriched() says whether we know hostnames
+// or only counts.
+
 // GapDuration is how long the hole was open.
 func (r Report) GapDuration() time.Duration {
 	if r.GapOpened.IsZero() || r.GapClosed.IsZero() {
@@ -75,6 +79,10 @@ func (r Report) Empty() bool {
 	return r.BlockedOutPackets == 0 && r.BlockedInPackets == 0 &&
 		r.DNSPackets == 0 && r.PortalPackets == 0
 }
+
+// ==== wording =============================================================
+// The phrasing is deliberate. It must never read as 'nothing leaked'
+// when we did not look.
 
 // String renders the report for a human at the end of a run.
 //
@@ -160,6 +168,10 @@ func joinIPs(ips []net.IP) string {
 	}
 	return strings.Join(out, ", ")
 }
+
+// ==== optional capability =================================================
+// Separate from Backend on purpose: a backend that cannot measure is
+// not a Reporter.
 
 // Reporter is implemented by backends that can account for the traffic they
 // filtered. It is separate from Backend so a backend that cannot do this is

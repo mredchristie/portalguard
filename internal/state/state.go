@@ -68,6 +68,9 @@ const (
 	EventRelease Event = "RELEASE"
 )
 
+// ==== the legal moves =====================================================
+// One table, and anything not in it is rejected. This is the safety net.
+
 // transitions is the whole legal graph. Anything absent from this table is
 // rejected, which is what stops, say, a gap being opened before a lockdown.
 var transitions = map[State]map[Event]State{
@@ -122,6 +125,9 @@ func (s State) Engaged() bool {
 	}
 }
 
+// ==== history =============================================================
+// Every move is recorded, so logs can show how we got here.
+
 // Transition is one recorded move.
 type Transition struct {
 	From  State     `json:"from"`
@@ -150,6 +156,9 @@ type InvalidTransitionError struct {
 func (e *InvalidTransitionError) Error() string {
 	return fmt.Sprintf("state: cannot apply %s in state %s", e.Event, e.From)
 }
+
+// ==== the machine =========================================================
+// Holds the current state. Pure - never touches network or firewall.
 
 // Machine tracks the current state. It is safe for concurrent use.
 type Machine struct {

@@ -47,6 +47,9 @@ func (b *Backend) Lockdown(ctx context.Context) error {
 	return nil
 }
 
+// ==== opening the gap =====================================================
+// Adds one host and reloads. Reloads are atomic - nothing leaks between.
+
 // AllowHost widens the gap by one host and reloads. Loading a ruleset into an
 // anchor is atomic, so there is no instant where the old rules are gone and
 // the new ones have not arrived.
@@ -94,6 +97,9 @@ func (b *Backend) AllowHost(ctx context.Context, h firewall.Host) error {
 func next(current []firewall.Host, h firewall.Host) []firewall.Host {
 	return append(append([]firewall.Host(nil), current...), h)
 }
+
+// ==== closing it again ====================================================
+// Drop the rules, empty the tables, kill connections already open.
 
 // Seal closes the gap and returns to a bare lockdown.
 //
@@ -203,6 +209,9 @@ func (b *Backend) killStatesTo(ctx context.Context, ip net.IP) error {
 	return err
 }
 
+// ==== talking to pf =======================================================
+// Every reload goes through here, so counter sampling lives here too.
+
 // loadLocked renders and loads an anchor ruleset from stdin, so no ruleset is
 // ever written to disk and nothing survives a reboot.
 func (b *Backend) loadLocked(ctx context.Context, g gap) error {
@@ -249,6 +258,10 @@ func (b *Backend) enableLocked(ctx context.Context) error {
 	// silently leaving a reference behind forever.
 	return fmt.Errorf("pf: enabled, but could not parse the reference token from: %q", strings.TrimSpace(out))
 }
+
+// ==== the safety check ====================================================
+// No hook in pf.conf means our rules load and filter nothing. Refuse
+// rather than pretend.
 
 // hookInstalled reports whether the main ruleset references our anchor. See
 // ErrNoAnchorHook for why this is checked before every lockdown.

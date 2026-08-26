@@ -45,6 +45,9 @@ anchor "portalguard"
 	hookAnchorPoint = `anchor "com.apple/*"`
 )
 
+// ==== install and revert ==================================================
+// The one-time edit to /etc/pf.conf. Backs up first, validates first.
+
 // InstallAnchor adds the hook to /etc/pf.conf and reloads the main ruleset.
 // It is idempotent. Requires root.
 func InstallAnchor(ctx context.Context) error {
@@ -115,6 +118,9 @@ func writeAndReload(ctx context.Context, candidate string, original []byte) erro
 	}
 	return nil
 }
+
+// ==== editing pf.conf =====================================================
+// Find the spot, insert our block, take it back out cleanly.
 
 // insertHook places the anchor block above the com.apple filter anchor.
 func insertHook(conf string) (string, error) {

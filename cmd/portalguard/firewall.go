@@ -15,6 +15,10 @@ import (
 	"portalguard/internal/state"
 )
 
+// ==== the VPN guard =======================================================
+// Refuse to engage while a tunnel owns the default route - its kill
+// switch would fight ours.
+
 // checkNoActiveVPN refuses to engage the firewall while a VPN owns the default
 // route.
 //
@@ -59,6 +63,9 @@ func vpnFlag(fs *flag.FlagSet) *bool {
 func logf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "portalguard: "+format+"\n", args...)
 }
+
+// ==== read-only commands ==================================================
+// Status just reports. It changes nothing.
 
 func runStatus(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
@@ -108,6 +115,9 @@ func indent(s, prefix string) string {
 	}
 	return out
 }
+
+// ==== commands that change the firewall ===================================
+// All need sudo. Release is the escape hatch and must always work.
 
 // runLockdown blocks everything. It deliberately does not detect first: the
 // user may want to lock down before they know what they are dealing with.
@@ -230,6 +240,10 @@ flags:
 }
 
 // runFlow drives the whole sequence and blocks until the user has logged in.
+// ==== the leak report =====================================================
+// Printed at seal. Never silent - a missing report and a clean one are
+// different things.
+
 // printReport shows what the firewall accounted for.
 //
 // It never returns silently. A missing report and an empty one mean different
@@ -255,6 +269,9 @@ func printReport(sess *state.Session) {
 	fmt.Print(rep.String())
 	fmt.Println("---")
 }
+
+// ==== the whole flow ======================================================
+// detect, lock down, open the gap, wait for you to log in, seal.
 
 func runFlow(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)

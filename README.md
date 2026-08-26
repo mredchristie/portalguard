@@ -44,6 +44,18 @@ make build
 ./bin/portalguard detect -v
 ```
 
+Before anything can program the packet filter, once per machine:
+
+```fish
+sudo ./bin/portalguard install-anchor
+```
+
+That adds one line to `/etc/pf.conf`. Stock macOS has no user anchor point, and
+without it every rule Portalguard loads would be stored and silently ignored —
+so lockdown checks for it and refuses rather than pretend. `sudo portalguard
+uninstall-anchor` reverts it; the original is backed up to
+`/etc/pf.conf.portalguard.bak`.
+
 Exit codes make it scriptable:
 
 | Code | Meaning         |
@@ -67,7 +79,10 @@ Test it against a fake portal without leaving the house — see
 | Command                | Root | What it does                                                   |
 | ---------------------- | ---- | -------------------------------------------------------------- |
 | `detect`               | no   | Classify the network. Changes nothing.                          |
+| `print-rules`          | no   | Print the pf ruleset without loading it.                        |
 | `status`               | no*  | Show the backend and what it is enforcing. *Root to read pf.    |
+| `install-anchor`       | yes  | Add the anchor point to `/etc/pf.conf`. Once per machine.       |
+| `uninstall-anchor`     | yes  | Revert that.                                                    |
 | `run`                  | yes  | The whole flow, blocking until you have logged in.              |
 | `lockdown`             | yes  | Block everything.                                               |
 | `allow [host]`         | yes  | Open the gap for the detected portal, or widen it for a host.   |
@@ -134,6 +149,42 @@ internal/firewall/     backend interface, host types, fail-safe teardown
 testenv/               a fake captive portal to test against
 docs/pf-design.md      the pf ruleset, explained line by line
 ```
+
+## Running alongside a VPN
+
+Portalguard is designed to run **before** your VPN, not beside it. A VPN kill
+switch works the same way the lockdown does — block everything, permit the
+tunnel — and two tools independently asserting "block everything except my
+thing" over one interface produce whatever the rule ordering happens to give.
+
+So every command that engages the firewall refuses when a tunnel owns the
+default route:
+
+```
+portalguard: utun7 (10.5.0.2) is up and carrying the default route (gateway 10.5.0.2).
+
+A VPN kill switch and portalguard's lockdown will fight over pf rules.
+portalguard is meant to run before the VPN, not beside it.
+
+Disconnect the VPN first, then re-run.
+To override anyway: --allow-active-vpn
+```
+
+The detection needs all three of: the default route leaves through the
+interface, the name is tunnel-shaped, and the interface has an address. Only
+the third rules out macOS's own permanently-up `utun` devices — there are
+usually seven of them, addressless, and a naive check would refuse to run on
+every Mac.
+
+Two honest limitations, both in [`docs/pf-design.md`](docs/pf-design.md):
+
+- **The DNS hole in `GAP_OPEN` is machine-wide.** Every background daemon's
+  queued lookups fire at the portal's resolver the moment it opens. Their
+  connections stay blocked, but the hostnames leak. v0.1 keeps the gap short
+  and logs what went through it; v0.2 scopes the rules to the browser's uid.
+- **The handoff window is not closed yet.** `HANDED_OFF` releases our rules and
+  then you bring the VPN up, which leaves a brief unprotected moment — a
+  smaller version of the problem this tool exists to solve.
 
 ## Failing safe
 

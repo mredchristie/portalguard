@@ -245,53 +245,92 @@ empty list that reads like an all-clear. Hostname and process detail is the
 ## Seeing it for yourself
 
 You do not need a hotel to reproduce the leak. **It is not the portal that
-causes it — it is the tunnel going down.** The instant your traffic stops
-going through the VPN, every background app that was waiting notices and
-reconnects, and its DNS goes out in the clear on whatever network you are on.
-A captive portal only makes it worse, by holding you in that state for minutes
-instead of seconds.
+causes it — it is the tunnel going down.** The instant your traffic stops going
+through the VPN, every background app that was waiting notices and reconnects,
+and its DNS goes out in the clear on whatever network you are on. A captive
+portal only makes it worse, by holding you in that state for minutes instead of
+seconds.
 
-So you can demonstrate the whole thing on your own Wi-Fi with a VPN toggle:
+So you can demonstrate it on your own Wi-Fi with a VPN toggle. Measured on the
+development machine:
 
-```fish
-# Capture DNS only. No sudo needed.
-tcpdump -i en0 -n -w ~/pg-demo/before.pcap 'udp port 53'
+| | DNS packets captured on `en0` |
+| --- | --- |
+| VPN toggled off, no Portalguard | **178, in plaintext** |
+| Portalguard locked down | **0** |
+
+Every one of those 178 packets carried the name of a service the machine uses,
+handed to whoever runs the network.
+
+### Why the zero is not the evidence
+
+An empty capture proves nothing on its own. It looks exactly like a quiet
+machine, or like a capture that was never running. Two other numbers are what
+turn it into evidence.
+
+**The capture was live.** tcpdump reported 128 packets reaching the filter
+during the locked-down window and none of them matching. The interface was
+carrying traffic; the zero is not an artefact of a dead capture.
+
+**The firewall was actively dropping.** During the same window, the block rules
+counted:
+
+```
+1948 outbound packets  (1,096,096 bytes)  dropped
+ 187 inbound packets   (   38,542 bytes)  dropped
 ```
 
-Disconnect your VPN, wait 30 seconds, reconnect, stop the capture. Then count
-the distinct hostnames that escaped:
+Read the counters before releasing, because releasing clears them:
 
 ```fish
-tcpdump -r ~/pg-demo/before.pcap -n 2>/dev/null | grep -oE 'A\? [^ ]+' | sort -u | wc -l
+sudo pfctl -a portalguard -s rules -v
 ```
 
-Every name on that list is a service you use, handed in plaintext to whoever
-runs the network. Now do the same 30 seconds with Portalguard holding the line
-(VPN disconnected, `sudo ./bin/portalguard lockdown`) and the capture comes
-back empty.
+That third number is the one that matters. Blocked outbound packets never reach
+the interface — the filter drops them before the capture point — so a packet
+sniffer *cannot* see what was stopped. It can only see what got out. The
+counter is the sole witness to the traffic that did not.
 
-**Show both halves, never either alone.** An empty capture on its own proves
-nothing — it looks exactly like a quiet machine, or like a capture that was
-never running. It only means something beside two other things:
+Absence of evidence and evidence of absence are different claims. The empty
+capture, the live-filter count, and the block counter together support the
+second one. Any of them alone does not.
 
-1. the **before** capture, showing that the same 30 seconds is *not* quiet, and
-2. the **block rule's packet counter**, showing the firewall actively dropping
-   traffic rather than there being none to drop:
+### What these numbers are not
 
-```fish
-sudo pfctl -a portalguard -s rules -v   # read this BEFORE releasing
-```
+Two things to be straight about when showing this, because both are easy to
+overstate:
 
-Absence of evidence and evidence of absence are different claims, and only the
-pairing supports the second one.
+**178 and 1948 are not the same measurement.** The 178 is DNS only — the
+capture filter discards everything else in the kernel. The 1948 is every
+outbound packet of every protocol the firewall stopped: DNS, but also TCP
+retries, mDNS, NTP, sync traffic, and anything else that tried. It is not a
+larger version of the 178, and presenting it as one would be a sleight of hand.
 
-One caution: that capture contains the hostnames *your* machine reaches for —
-mail, cloud storage, messaging. Treat it as personal. The `'udp port 53'`
-filter is applied by the kernel so nothing else is ever written to disk, and
-`.gitignore` already excludes `*.pcap` and `pg-demo/`. Before showing anyone,
-replace names with categories — `<mail provider>`, not the brand.
+**The two windows were not recorded as equal length.** The counts above are
+each true of their own window, and none of the reasoning here rests on
+comparing their rates. Treat them as two observations, not a ratio.
 
-Full procedure, including redaction: [`docs/demo.md`](docs/demo.md).
+### What it does not show
+
+**This demonstrates lockdown, not the gap.** It compares "firewall engaged"
+against "no firewall", on a VPN toggle, with no captive portal involved at any
+point. It says nothing about the harder claim — that `GAP_OPEN` lets the login
+page through and nothing else. That claim is demonstrated by the end-to-end
+test, which reaches a real off-box host through the gap while a control host
+stays blocked. See [`docs/architecture.md`](docs/architecture.md).
+
+### Handling the capture
+
+That file contains the hostnames *your* machine reaches for — mail, cloud
+storage, messaging. Treat it as personal. The `'udp port 53'` filter is applied
+by the kernel so nothing else is ever written to disk, and `.gitignore`
+excludes `*.pcap`, `*.pcapng` and `pg-demo/` so a stray capture cannot be
+committed.
+
+Before showing anyone, replace every name with a **category, not a product** —
+`<mail provider>`, not the brand; `<mail client>`, not the application. Only
+the redacted summary belongs in the repo. Full procedure:
+[`docs/demo.md`](docs/demo.md).
 
 ## A warning you can ignore
 

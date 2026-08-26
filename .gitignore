@@ -1,7 +1,9 @@
 # Build output
 /bin/
 /dist/
-portalguard
+# The binary when built into the repo root. Anchored, or it would also
+# exclude cmd/portalguard/.
+/portalguard
 
 # Go
 *.test

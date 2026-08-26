@@ -1,0 +1,259 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"os"
+	"time"
+
+	"github.com/mredchristie/portalguard/internal/firewall"
+	"github.com/mredchristie/portalguard/internal/firewall/backend"
+	"github.com/mredchristie/portalguard/internal/portal"
+	"github.com/mredchristie/portalguard/internal/state"
+)
+
+// logf is the CLI's logger: plain lines on stderr so stdout stays parseable.
+func logf(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "portalguard: "+format+"\n", args...)
+}
+
+func runStatus(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	asJSON := fs.Bool("json", false, "emit status as JSON")
+	if err := fs.Parse(args); err != nil {
+		return exitUsageError
+	}
+
+	fw := backend.New()
+	st, err := fw.Status(ctx)
+	if err != nil {
+		return fail(err)
+	}
+
+	if *asJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(st); err != nil {
+			return fail(err)
+		}
+		return exitOK
+	}
+
+	fmt.Printf("backend  : %s\n", st.Backend)
+	fmt.Printf("available: %t\n", st.Available)
+	fmt.Printf("phase    : %s\n", st.Phase)
+	fmt.Printf("managed  : %t\n", st.Managed)
+	for _, h := range st.Allowed {
+		fmt.Printf("allowed  : %s\n", h)
+	}
+	if st.Detail != "" {
+		fmt.Printf("detail   :\n%s\n", indent(st.Detail, "  "))
+	}
+	if !st.Available && os.Geteuid() != 0 {
+		fmt.Println("\n(run with sudo to read the live pf ruleset)")
+	}
+	return exitOK
+}
+
+func indent(s, prefix string) string {
+	out := prefix
+	for _, r := range s {
+		out += string(r)
+		if r == '\n' {
+			out += prefix
+		}
+	}
+	return out
+}
+
+// runLockdown blocks everything. It deliberately does not detect first: the
+// user may want to lock down before they know what they are dealing with.
+func runLockdown(ctx context.Context, args []string) int {
+	if err := requireRoot("lockdown"); err != nil {
+		return fail(err)
+	}
+	fw := backend.New()
+	if ok, why := fw.Available(ctx); !ok {
+		return fail(fmt.Errorf("%s backend unavailable: %s", fw.Name(), why))
+	}
+	if err := fw.Lockdown(ctx); err != nil {
+		return fail(notImplementedHint(err))
+	}
+	logf("all traffic blocked. run `sudo portalguard release` to undo")
+	return exitOK
+}
+
+// runSeal closes the gap but keeps the lockdown.
+func runSeal(ctx context.Context, args []string) int {
+	if err := requireRoot("seal"); err != nil {
+		return fail(err)
+	}
+	fw := backend.New()
+	if err := fw.Seal(ctx); err != nil {
+		return fail(notImplementedHint(err))
+	}
+	logf("gap closed; traffic is still blocked. bring up your VPN, then `sudo portalguard release`")
+	return exitOK
+}
+
+// runRelease is the escape hatch. It must work in every situation, so it does
+// not check availability first and reports partial failure loudly.
+func runRelease(ctx context.Context, args []string) int {
+	if err := requireRoot("release"); err != nil {
+		return fail(err)
+	}
+	fw := backend.New()
+	if err := fw.Release(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "portalguard: release failed: %v\n", err)
+		fmt.Fprintln(os.Stderr, "portalguard: fall back to `sudo pfctl -a portalguard -F all`")
+		return exitError
+	}
+	logf("rules released; normal networking restored")
+	return exitOK
+}
+
+// runAllow opens the gap for the detected portal, or widens it for a host the
+// user names when a portal bounces through somewhere unexpected.
+func runAllow(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("allow", flag.ContinueOnError)
+	fs.Usage = func() {
+		fmt.Fprint(os.Stderr, `usage: portalguard allow [host]
+
+With no host, detects the portal and opens the gap for it. With a host,
+widens an already-open gap to include that host as well.
+
+flags:
+`)
+		fs.PrintDefaults()
+	}
+	build := proberFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return exitUsageError
+	}
+	if err := requireRoot("allow"); err != nil {
+		return fail(err)
+	}
+
+	prober, err := build()
+	if err != nil {
+		return fail(err)
+	}
+
+	fw := backend.New()
+	safety := firewall.InstallSafetyNet(fw, logf)
+	defer safety.Stop()
+
+	sess := state.NewSession(fw, prober, logf)
+
+	if fs.NArg() > 0 {
+		if err := sess.AllowExtra(ctx, fs.Arg(0)); err != nil {
+			return fail(notImplementedHint(err))
+		}
+		return exitOK
+	}
+
+	res, err := sess.Detect(ctx)
+	if err != nil {
+		return fail(err)
+	}
+	if res.Class != portal.Portal {
+		logf("no portal to open a gap for (%s)", res.Class)
+		return classExit(res.Class)
+	}
+	if err := sess.Lockdown(ctx); err != nil {
+		return fail(notImplementedHint(err))
+	}
+	if err := sess.OpenGap(ctx); err != nil {
+		return fail(notImplementedHint(err))
+	}
+	fmt.Printf("gap open. log in yourself at: %s\n", res.PortalURL)
+	return exitOK
+}
+
+// runFlow drives the whole sequence and blocks until the user has logged in.
+func runFlow(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("run", flag.ContinueOnError)
+	fs.Usage = func() {
+		fmt.Fprint(os.Stderr, `usage: portalguard run [flags]
+
+Detects the portal, blocks everything, opens a gap for the login page only,
+waits for you to log in yourself, then seals back up ready for your VPN.
+
+portalguard never enters credentials or accepts terms on your behalf.
+
+flags:
+`)
+		fs.PrintDefaults()
+	}
+	build := proberFlags(fs)
+	wait := fs.Duration("wait", 10*time.Minute, "how long to wait for you to finish logging in")
+	poll := fs.Duration("poll", 3*time.Second, "how often to re-probe while waiting")
+	if err := fs.Parse(args); err != nil {
+		return exitUsageError
+	}
+	if err := requireRoot("run"); err != nil {
+		return fail(err)
+	}
+
+	prober, err := build()
+	if err != nil {
+		return fail(err)
+	}
+
+	fw := backend.New()
+	if ok, why := fw.Available(ctx); !ok {
+		return fail(fmt.Errorf("%s backend unavailable: %s", fw.Name(), why))
+	}
+
+	// From here on the firewall may be engaged, so the safety net matters.
+	safety := firewall.InstallSafetyNet(fw, logf)
+	defer safety.Stop()
+
+	sess := state.NewSession(fw, prober, logf)
+	sess.Machine().Observe(func(t state.Transition) { logf("%s", t) })
+
+	err = firewall.Guard(fw, logf, func() error {
+		res, err := sess.Detect(ctx)
+		if err != nil {
+			return err
+		}
+		if res.Class != portal.Portal {
+			logf("nothing to do (%s)", res.Class)
+			return nil
+		}
+
+		if err := sess.Lockdown(ctx); err != nil {
+			return err
+		}
+		if err := sess.OpenGap(ctx); err != nil {
+			// The lockdown is still standing; release it rather than
+			// leaving the user offline with no explanation.
+			_ = sess.Release(ctx)
+			return err
+		}
+
+		fmt.Printf("\nOpen this page and log in yourself:\n  %s\n\n", res.PortalURL)
+		fmt.Println("Everything else on this machine is blocked while you do.")
+		fmt.Printf("Waiting up to %s for the login to go through...\n", *wait)
+
+		waitCtx, cancel := context.WithTimeout(ctx, *wait)
+		defer cancel()
+		if err := sess.WaitForAuth(waitCtx, *poll); err != nil {
+			_ = sess.Release(ctx)
+			return fmt.Errorf("gave up waiting for the portal login: %w", err)
+		}
+
+		if err := sess.Seal(ctx); err != nil {
+			return err
+		}
+		fmt.Println("\nAuthenticated and sealed. Traffic is still blocked.")
+		fmt.Println("Bring up your VPN now, then run: sudo portalguard release")
+		return nil
+	})
+	if err != nil {
+		return fail(notImplementedHint(err))
+	}
+	return exitOK
+}

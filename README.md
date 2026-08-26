@@ -38,6 +38,34 @@ driven end to end against the test portal, and the `pflog0` reader behind the
 DNS leak log. Linux and Windows are stubs with their designs recorded but no
 implementation.
 
+## What it changes on your Mac, in plain terms
+
+macOS ships with a firewall in the kernel called **pf**. It is off by default,
+it has no user interface, and most people never touch it. Portalguard drives it
+from the command line.
+
+Two ideas are worth knowing before you install anything, because everything
+else follows from them:
+
+**Rules live in a named box.** pf lets a tool put its rules in a labelled
+container of its own — the term is an *anchor* — instead of mixing them in with
+everyone else's. Portalguard's is called `portalguard`. Emptying that box
+removes every rule Portalguard has ever added and touches nothing else on the
+system. That is the whole basis of the recovery story further down: one
+command, and your network is back.
+
+**The box has to be plugged in once.** A stock Mac has nowhere for a third
+party's rules to hang, so `install-anchor` adds a single line to
+`/etc/pf.conf` — the file macOS reads at boot — pointing at Portalguard's box.
+The box is empty unless Portalguard is running, so that line does nothing at
+all the rest of the time. It backs up the original file first, and
+`uninstall-anchor` puts it back.
+
+This matters more than it sounds: if that line is missing, rules load fine and
+filter *nothing*. Portalguard would report that your machine is locked down
+while it is wide open. So it checks for the line every time and refuses to
+start without it, rather than protecting you in name only.
+
 ## Quick start
 
 ```fish
@@ -53,11 +81,8 @@ Before anything can program the packet filter, once per machine:
 sudo ./bin/portalguard install-anchor
 ```
 
-That adds one line to `/etc/pf.conf`. Stock macOS has no user anchor point, and
-without it every rule Portalguard loads would be stored and silently ignored —
-so lockdown checks for it and refuses rather than pretend. `sudo portalguard
-uninstall-anchor` reverts it; the original is backed up to
-`/etc/pf.conf.portalguard.bak`.
+That is the one-line change described above. You only ever do it once, and
+`sudo ./bin/portalguard uninstall-anchor` undoes it.
 
 Exit codes make it scriptable:
 
@@ -82,9 +107,9 @@ Test it against a fake portal without leaving the house — see
 | Command                | Root | What it does                                                   |
 | ---------------------- | ---- | -------------------------------------------------------------- |
 | `detect`               | no   | Classify the network. Changes nothing.                          |
-| `print-rules`          | no   | Print the pf ruleset without loading it.                        |
-| `status`               | no*  | Show the backend and what it is enforcing. *Root to read pf.    |
-| `install-anchor`       | yes  | Add the anchor point to `/etc/pf.conf`. Once per machine.       |
+| `print-rules`          | no   | Show the firewall rules it would apply, without applying them.  |
+| `status`               | no*  | Show what is currently being enforced. *Root, to read the rules.|
+| `install-anchor`       | yes  | The one-line setup above. Once per machine.                     |
 | `uninstall-anchor`     | yes  | Revert that.                                                    |
 | `run`                  | yes  | The whole flow, blocking until you have logged in.              |
 | `lockdown`             | yes  | Block everything.                                               |
@@ -150,7 +175,9 @@ internal/firewall/     backend interface, host types, fail-safe teardown
   wfp/                 Windows (stub)
   backend/             build-tagged selection
 testenv/               a fake captive portal to test against
-docs/pf-design.md      the pf ruleset, explained line by line
+docs/architecture.md   how the pieces fit, and what is proven
+docs/pf-design.md      the firewall rules, explained line by line
+docs/demo.md           reproducing the leak, and redacting the capture
 ```
 
 ## Running alongside a VPN
@@ -215,6 +242,57 @@ alone is *which* hostnames those were — so it says that, rather than showing a
 empty list that reads like an all-clear. Hostname and process detail is the
 `pflog` layer, still to come.
 
+## Seeing it for yourself
+
+You do not need a hotel to reproduce the leak. **It is not the portal that
+causes it — it is the tunnel going down.** The instant your traffic stops
+going through the VPN, every background app that was waiting notices and
+reconnects, and its DNS goes out in the clear on whatever network you are on.
+A captive portal only makes it worse, by holding you in that state for minutes
+instead of seconds.
+
+So you can demonstrate the whole thing on your own Wi-Fi with a VPN toggle:
+
+```fish
+# Capture DNS only. No sudo needed.
+tcpdump -i en0 -n -w ~/pg-demo/before.pcap 'udp port 53'
+```
+
+Disconnect your VPN, wait 30 seconds, reconnect, stop the capture. Then count
+the distinct hostnames that escaped:
+
+```fish
+tcpdump -r ~/pg-demo/before.pcap -n 2>/dev/null | grep -oE 'A\? [^ ]+' | sort -u | wc -l
+```
+
+Every name on that list is a service you use, handed in plaintext to whoever
+runs the network. Now do the same 30 seconds with Portalguard holding the line
+(VPN disconnected, `sudo ./bin/portalguard lockdown`) and the capture comes
+back empty.
+
+**Show both halves, never either alone.** An empty capture on its own proves
+nothing — it looks exactly like a quiet machine, or like a capture that was
+never running. It only means something beside two other things:
+
+1. the **before** capture, showing that the same 30 seconds is *not* quiet, and
+2. the **block rule's packet counter**, showing the firewall actively dropping
+   traffic rather than there being none to drop:
+
+```fish
+sudo pfctl -a portalguard -s rules -v   # read this BEFORE releasing
+```
+
+Absence of evidence and evidence of absence are different claims, and only the
+pairing supports the second one.
+
+One caution: that capture contains the hostnames *your* machine reaches for —
+mail, cloud storage, messaging. Treat it as personal. The `'udp port 53'`
+filter is applied by the kernel so nothing else is ever written to disk, and
+`.gitignore` already excludes `*.pcap` and `pg-demo/`. Before showing anyone,
+replace names with categories — `<mail provider>`, not the brand.
+
+Full procedure, including redaction: [`docs/demo.md`](docs/demo.md).
+
 ## A warning you can ignore
 
 Every rule load prints this, and it is not an error:
@@ -225,26 +303,34 @@ present in the main ruleset added by the program,
 e.g. portmap or SecurityAgent
 ```
 
-pfctl prints it on any `-f`, including the anchor-scoped loads Portalguard uses,
-which cannot touch the main ruleset at all. Nothing has gone wrong.
+It is printed on every rule load, including Portalguard's — which only ever
+write into their own box and cannot touch anything else. Nothing has gone
+wrong.
 
-One related thing worth knowing: **pf reorders rules as it loads them**, so
-`sudo pfctl -a portalguard -s rules` is the authoritative account of what is
-being enforced. The generated text is only the request.
+One related thing worth knowing: **pf rewrites and reorders rules as it loads
+them**, so if you want to know what is actually being enforced, ask the kernel
+rather than reading the generated text:
+
+```fish
+sudo pfctl -a portalguard -s rules
+```
 
 ## Failing safe
 
 The rule that outranks everything else: **if Portalguard dies, your network
 comes back.**
 
-- Every rule lives inside one pf anchor. `pfctl -a portalguard -F all` is a
-  complete undo, and it cannot affect anything else on the system.
-- The main pf ruleset and `/etc/pf.conf` are never edited, so nothing survives
-  a reboot.
+- Every rule lives inside Portalguard's own box. Emptying it is a complete
+  undo, and it cannot affect anything else on the system.
+- No rule is ever written to disk. Rules are handed to the kernel directly, so
+  nothing Portalguard enforces can survive a reboot. (The one-line setup in
+  `/etc/pf.conf` does persist — but it only points at an empty box, so it
+  enforces nothing on its own.)
 - A signal handler releases the rules on SIGINT, SIGTERM, SIGHUP and SIGQUIT,
   and a panic while the firewall is engaged releases before it unwinds.
-- pf is enabled through its reference-counted interface (`pfctl -E` / `-X`), so
-  Portalguard never disables pf out from under another user of it.
+- pf is shared with the rest of the system, so Portalguard switches it on
+  through a reference count and only ever releases its own claim. It can never
+  switch pf off underneath something else that is using it.
 
 `SIGKILL` and a power cut are the cases no handler can catch. For those, one
 line gets your network back:

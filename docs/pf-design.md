@@ -598,6 +598,150 @@ not the eventual design.
 
 ---
 
+## 6. The leak log
+
+The gap's DNS hole is machine-wide, and section 2 commits v0.1 to making that
+visible rather than pretending otherwise. This is how.
+
+### pflog0 does not exist on this Mac
+
+```
+$ ifconfig pflog0
+ifconfig: interface pflog0 does not exist
+```
+
+It is not missing because something is broken. `pflog(4)` is a *pseudo-device*:
+
+> The pflog interface is a pseudo-device which makes visible all packets logged
+> by the packet filter. [...] Instances of the pflog interface can be created
+> using ifconfig(8).
+
+Nothing on macOS creates one for you. The only thing the system does with pf at
+boot is `com.apple.pfctl.plist`, which runs exactly `pfctl -f /etc/pf.conf` —
+it loads the ruleset and creates no interfaces. Enabling pf does not create one
+either; the interface and the filter are independent.
+
+So Portalguard has to create it:
+
+```fish
+sudo ifconfig pflog0 create
+sudo ifconfig pflog0 up
+```
+
+and destroy it on teardown — but **only if we created it**. Another tool may
+already be logging to pflog0, and destroying its interface is the same class of
+mistake as `pfctl -d` would be. The rule is the one we already apply to the pf
+enable token: record whether it existed before we touched it, and put it back
+exactly as we found it.
+
+A cleaner option is available and I would take it: **log to a dedicated
+`pflog1` instead.** `pf.conf(5)` supports `log (to <interface>)`, so our rules
+can name their own log device the same way they live in their own anchor. Then
+there is no shared resource to get wrong, and `ifconfig pflog1 destroy` cannot
+disturb anyone.
+
+### Reading it needs no root on this machine
+
+```
+$ ls -l /dev/bpf0
+crw-rw----  1 root  access_bpf  ...
+$ id -Gn | grep access_bpf
+access_bpf
+```
+
+`/dev/bpf*` is group `access_bpf` and this user is a member, so `tcpdump -i
+pflog1` reads the log without sudo. **Creating** the interface needs root;
+**reading** it does not. That is a good split: the privileged step happens once,
+inside the same `sudo` that programs the filter, and the reader can run
+unprivileged for as long as the gap is open.
+
+### Two mechanisms, and only one of them needs pflog
+
+Counting and content are separate problems, and conflating them would make us
+build the expensive thing for both.
+
+**Counts come from pf's own rule statistics — no pflog, no capture, no BPF:**
+
+```fish
+sudo pfctl -a portalguard -s rules -v
+```
+
+> When used together with -v, the per-rule statistics (number of evaluations,
+> packets and bytes) are also shown.
+
+That answers "how many packets were blocked during lockdown" and "how many
+packets went through the DNS hole" directly, from the same rules we already
+load. Two caveats from the same man page, both of which we have to respect:
+
+- The kernel's skip-step optimisation can skip evaluating a rule, so the
+  *evaluations* column undercounts. Packets and bytes for rules that did match
+  are real.
+- "Packets passed statefully are counted in the rule that created the state" —
+  which is what we want, since it attributes the whole conversation to the gap
+  rule that permitted it.
+
+**Content and attribution need pflog:** which hostnames were queried, and by
+what. There is no way to get that from a counter.
+
+### Two ruleset changes this needs — not yet applied
+
+Both change rules that were reviewed in section 2, so they are recorded here
+rather than made.
+
+**1. The DNS rules need `log (all)`, not bare `log`.** From `pf.conf(5)`:
+
+> log — In addition to the action specified, a log message is generated. **Only
+> the packet that establishes the state is logged**, unless the no state option
+> is specified.
+
+Our DNS rules use `keep state`. A resolver that opens a fresh socket per query
+creates a new state per query, so each one gets logged and bare `log` would be
+fine. But macOS's own resolver does not work that way: `mDNSResponder`
+multiplexes queries over long-lived sockets. One state, one log line, and every
+subsequent query — the ones we most want to count — invisible.
+
+That is precisely the failure where the leak report would read "1 query" during
+a gap that leaked fifty. `log (all)` forces logging of every packet in the
+connection and fixes it.
+
+**2. `log (user)` gives us the process attribution for free.**
+
+> log (user) — Logs the UNIX user ID of the user that owns the socket and the
+> PID of the process that has the socket open [...] in addition to the normal
+> information logged.
+
+The leak report sketched in section 2 wanted "23 DNS queries leaked to
+192.168.1.1 from 6 processes". The process half is a keyword, not a research
+project. Combined:
+
+```pf
+pass out log (all, user) quick inet  proto { tcp, udp } to <pg_dns> port 53 keep state
+pass out log (all, user) quick inet6 proto { tcp, udp } to <pg_dns> port 53 keep state
+```
+
+**3. Counting blocked packets during lockdown needs nothing.** The block rules
+stay exactly as reviewed — no `log` on them. Their packet counters already
+answer "how much was held back", and logging every dropped packet on a hostile
+network is a good way to fill a disk for no benefit.
+
+### Implementation shape
+
+`tcpdump` is at `/usr/sbin/tcpdump` and reads pflog natively — the pflog link
+type carries the action, the rule number and the interface, which is why
+`tcpdump -n -e -ttt -i pflog1` is the documented invocation. Shelling out to it
+keeps the module's zero-dependency record intact; the alternative is cgo and
+libpcap, which is a large amount of surface to add for one reader.
+
+Lifecycle, mirroring the pf enable token exactly:
+
+1. At `OpenGap`: create `pflog1` if absent, remember whether we created it,
+   bring it up, start the reader.
+2. While open: parse query names and owning PIDs, count per destination.
+3. At `Seal`: stop the reader, report, and destroy `pflog1` only if we created
+   it.
+4. On any teardown path, including the panic and signal handlers: the same
+   destroy-if-ours.
+
 ## Decisions, reviewed and settled
 
 Four questions went to review. All four are settled; recording them here so

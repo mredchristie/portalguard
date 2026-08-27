@@ -30,20 +30,28 @@ const (
 	beginMarker = "# BEGIN portalguard"
 	endMarker   = "# END portalguard"
 
-	// hookBlock is inserted verbatim. Placement matters twice over: it must
-	// come after the nat/rdr/dummynet anchors, because pf demands options then
-	// normalisation then translation then filtering and this is a filter
-	// anchor; and it comes before com.apple so that our `quick` block cannot
-	// be undercut by a `pass quick` inside the AirDrop or Application Firewall
-	// anchors Apple populates dynamically.
-	hookBlock = beginMarker + ` - anchor point, empty unless portalguard is running.
-# Remove this block, or run ` + "`sudo portalguard uninstall-anchor`" + `, to revert.
-anchor "portalguard"
-` + endMarker
-
 	// hookAnchorPoint is the line the block is inserted above.
 	hookAnchorPoint = `anchor "com.apple/*"`
 )
+
+// hookBlock is inserted verbatim. Placement matters twice over: it must come
+// after the nat/rdr/dummynet anchors, because pf demands options then
+// normalisation then translation then filtering and this is a filter anchor;
+// and it comes before com.apple so that our `quick` block cannot be undercut
+// by a `pass quick` inside the AirDrop or Application Firewall anchors Apple
+// populates dynamically.
+//
+// A function rather than a const so the revert instruction it writes into
+// /etc/pf.conf names how this specific `install-anchor` invocation was
+// actually run (os.Args[0]) instead of a bare "portalguard", which fails
+// with "command not found" for the common case of a binary that was never
+// `make install`'d onto PATH.
+func hookBlock() string {
+	return beginMarker + " - anchor point, empty unless portalguard is running.\n" +
+		"# Remove this block, or run `sudo " + os.Args[0] + " uninstall-anchor`, to revert.\n" +
+		`anchor "portalguard"` + "\n" +
+		endMarker
+}
 
 // ==== install and revert ==================================================
 // The one-time edit to /etc/pf.conf. Backs up first, validates first.
@@ -131,7 +139,7 @@ func insertHook(conf string) (string, error) {
 		}
 		out := make([]string, 0, len(lines)+5)
 		out = append(out, lines[:i]...)
-		out = append(out, strings.Split(hookBlock, "\n")...)
+		out = append(out, strings.Split(hookBlock(), "\n")...)
 		out = append(out, lines[i:]...)
 		return strings.Join(out, "\n"), nil
 	}
@@ -170,5 +178,5 @@ func AnchorInstalled() (bool, error) {
 }
 
 func firewallNeedsRoot(cmd string) error {
-	return fmt.Errorf("pf: %s edits %s and needs root: try `sudo portalguard %s`", cmd, PfConfPath, cmd)
+	return fmt.Errorf("pf: %s edits %s and needs root: try `sudo %s %s`", cmd, PfConfPath, os.Args[0], cmd)
 }

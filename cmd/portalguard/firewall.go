@@ -142,7 +142,7 @@ func runLockdown(ctx context.Context, args []string) int {
 	if err := fw.Lockdown(ctx); err != nil {
 		return fail(hint(err))
 	}
-	logf("all traffic blocked. run `sudo portalguard release` to undo")
+	logf("all traffic blocked. run `sudo %s release` to undo", invokedAs())
 	return exitOK
 }
 
@@ -155,7 +155,7 @@ func runSeal(ctx context.Context, args []string) int {
 	if err := fw.Seal(ctx); err != nil {
 		return fail(hint(err))
 	}
-	logf("gap closed; traffic is still blocked. bring up your VPN, then `sudo portalguard release`")
+	logf("gap closed; traffic is still blocked. bring up your VPN, then `sudo %s release`", invokedAs())
 	return exitOK
 }
 
@@ -252,7 +252,24 @@ flags:
 // report was absent and there was no output to say whether that was because
 // the backend could not account for traffic, because the counters read as
 // zero, or because the code was not in the binary at all.
-func printReport(sess *state.Session) {
+//
+// redact, when true, generalises hostnames to categories before printing -
+// for a report headed somewhere other than your own reading, e.g. pasted
+// into a bug report, or a screen recording. The default is full detail, for
+// local use.
+//
+// verbose, when true and process attribution backed off, additionally
+// prints why. That detail (rep.ProcessNote) is diagnostic - which of the
+// two ways the raw pflog path can fail, and the specific bytes involved -
+// not something a normal user needs, so it stays out of the report unless
+// asked for.
+//
+// auditLog, when non-empty, writes the full, unredacted report to that path
+// - never to stdout. It exists so a redacted run's own printed output can be
+// verified against real ground truth (e.g. by the e2e suite, checking that
+// nothing raw reached what got displayed or recorded) without the real
+// hostnames ever appearing on screen. Most callers leave it empty.
+func printReport(sess *state.Session, redact, verbose bool, auditLog string) {
 	rep, ok := sess.Report()
 	if !ok {
 		fmt.Println("\nThis firewall backend cannot account for the traffic it filtered,")
@@ -265,9 +282,20 @@ func printReport(sess *state.Session) {
 		fmt.Println("be read, not that nothing happened.")
 		return
 	}
+	if auditLog != "" {
+		if err := os.WriteFile(auditLog, []byte(rep.String()), 0o600); err != nil {
+			logf("could not write -audit-log %s: %v", auditLog, err)
+		}
+	}
+	if redact {
+		rep = rep.Redact() // touches Names only; ProcessNote is unaffected
+	}
 	fmt.Println("\n--- what happened while portalguard was engaged ---")
 	fmt.Print(rep.String())
 	fmt.Println("---")
+	if verbose && rep.ProcessNote != "" {
+		fmt.Printf("\ndiagnostic: process attribution backed off: %s\n", rep.ProcessNote)
+	}
 }
 
 // ==== the whole flow ======================================================
@@ -291,6 +319,9 @@ flags:
 	wait := fs.Duration("wait", 10*time.Minute, "how long to wait for you to finish logging in")
 	poll := fs.Duration("poll", 3*time.Second, "how often to re-probe while waiting")
 	allowVPN := vpnFlag(fs)
+	redact := fs.Bool("redact", false, "generalise hostnames in the leak report to categories, for output you plan to share")
+	verbose := fs.Bool("verbose", false, "if process attribution backs off, print why (diagnostic; not shown by default)")
+	auditLog := fs.String("audit-log", "", "write the full, unredacted report to this file (never to stdout) - for verifying a -redact run against ground truth without displaying it")
 	if err := fs.Parse(args); err != nil {
 		return exitUsageError
 	}
@@ -356,9 +387,9 @@ flags:
 		}
 		fmt.Println("\nAuthenticated and sealed. Traffic is still blocked.")
 
-		printReport(sess)
+		printReport(sess, *redact, *verbose, *auditLog)
 
-		fmt.Println("Bring up your VPN now, then run: sudo portalguard release")
+		fmt.Printf("Bring up your VPN now, then run: sudo %s release\n", invokedAs())
 		return nil
 	})
 	if err != nil {

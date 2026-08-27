@@ -3,6 +3,7 @@ package firewall
 import (
 	"fmt"
 	"net"
+	"sort"
 	"strings"
 	"time"
 )
@@ -51,7 +52,48 @@ type Report struct {
 	// this needs packet logging; counters alone cannot.
 	Names []string `json:"names,omitempty"`
 	// Processes, when non-empty, names what made those queries.
+	//
+	// Names and Processes come from two different mechanisms and degrade
+	// independently. Names comes from tcpdump's own DNS decoder, a stable
+	// public interface. Processes comes from parsing the pflog record's
+	// uid/pid fields by hand, since neither tcpdump nor the macOS SDK
+	// exposes them - an undocumented layout that a future macOS could
+	// silently change. A report can therefore have hostnames with no
+	// process attribution; the reverse should not happen.
 	Processes []string `json:"processes,omitempty"`
+	// ProcessesUnavailable records that process attribution was attempted
+	// and failed, as distinct from it never being attempted (which
+	// Enriched() being false already covers). It only matters when Names
+	// is non-empty: that is the one state where the rendering must say
+	// "hostnames yes, processes no" rather than fall back to the disclaimer
+	// that nothing is known, which would now be false.
+	ProcessesUnavailable bool `json:"processes_unavailable,omitempty"`
+	// ProcessesDeclinedByKernel is a more specific true than
+	// ProcessesUnavailable: it means every record this run saw carried
+	// pf's own "not attributed to a process" signal, confirmed against
+	// real ground truth (see internal/firewall/pf/leakreader.go's
+	// pidSentinel), rather than this package failing to read or trust the
+	// data. It is a different and more useful statement - "the kernel did
+	// not say" is not the same claim as "we could not tell" - so it gets
+	// its own line in String() instead of collapsing into the generic
+	// wording. Only meaningful when ProcessesUnavailable is also true.
+	ProcessesDeclinedByKernel bool `json:"processes_declined_by_kernel,omitempty"`
+	// ProcessNote is the diagnostic behind ProcessesUnavailable, tagged
+	// with which kind: "[parse] ..." means a record's own bytes looked
+	// wrong, most likely the reverse-engineered struct offsets themselves;
+	// "[heuristic] ..." means every record parsed cleanly but the aggregate
+	// looked implausible, most likely the heuristic being too eager rather
+	// than the parse being wrong; "[kernel] ..." means
+	// ProcessesDeclinedByKernel - not a failure of this package's reading
+	// at all. The first two need opposite fixes and the third needs no fix,
+	// which is why the tag exists rather than one bucket of prose.
+	//
+	// Diagnostic, not for a normal user: String() never includes it. It
+	// lives on the Report, not only in the backend's Status(), because a
+	// Status() note dies with the process that set it - gone the moment
+	// that run exits, sometimes before anyone thought to check. A report
+	// gets printed and can be kept.
+	ProcessNote string `json:"process_note,omitempty"`
 
 	// Source records where the numbers came from, so the rendering can be
 	// precise about its own limits.
@@ -126,8 +168,20 @@ func (r Report) String() string {
 			if len(r.Names) > 0 {
 				fmt.Fprintf(&b, "Hostnames queried: %s\n", strings.Join(r.Names, ", "))
 			}
-			if len(r.Processes) > 0 {
+			switch {
+			case len(r.Processes) > 0:
 				fmt.Fprintf(&b, "Asked by: %s\n", strings.Join(r.Processes, ", "))
+			case r.ProcessesDeclinedByKernel:
+				// A different and more useful claim than the generic line
+				// below: the kernel itself did not attribute these packets
+				// to a process, confirmed against real ground truth - this
+				// is not a failure of this package's reading.
+				b.WriteString("The kernel did not attribute these queries to a process.\n")
+			case r.ProcessesUnavailable:
+				// Hostnames are known; which process asked for them is not.
+				// This must not read as the full disclaimer below - that
+				// would understate what the report actually knows.
+				b.WriteString("Which process made these queries could not be determined.\n")
 			}
 		} else {
 			b.WriteString("Which hostnames were asked for, and by which processes, is not known:\n")
@@ -167,6 +221,109 @@ func joinIPs(ips []net.IP) string {
 		out[i] = ip.String()
 	}
 	return strings.Join(out, ", ")
+}
+
+// ==== redaction ============================================================
+// The hostname list is the most identifying part of a report - it names
+// which mail provider, which extensions, which accounts a machine talks to.
+// Redact exists for the moment someone wants to post or attach a report
+// rather than just read it themselves.
+
+// Redact returns a copy of r with hostnames generalised to broad categories
+// instead of named, and resolver addresses removed outright. It is opt-in:
+// the default (calling String directly on an unredacted Report) stays full
+// detail, for reading on your own machine. Call Redact first for anything
+// meant to be shared.
+//
+// Resolvers is cleared unconditionally, not generalised like Names - an
+// IPv6 resolver address commonly encodes a real MAC address in its
+// interface identifier (the modified-EUI-64 form, "...ff:fe..." at a fixed
+// offset), and even the private-network IPv4 case adds nothing a shared
+// report needs. This was found by inspection of a real recording rather
+// than assumed: a router's IPv6 address with a derivable MAC address ended
+// up plainly visible in an already-redacted demo before this existed.
+//
+// Process names are the one thing left as-is. A process name
+// (mDNSResponder) says what kind of thing made a query; a hostname says who
+// it talked to and often who you are, and a resolver address can say
+// exactly which piece of hardware you are - that is the part this exists to
+// generalise or remove.
+func (r Report) Redact() Report {
+	r.Resolvers = nil
+
+	if len(r.Names) == 0 {
+		return r
+	}
+	counts := make(map[string]int, len(r.Names))
+	for _, name := range r.Names {
+		counts[hostnameCategory(name)]++
+	}
+	cats := make([]string, 0, len(counts))
+	for c := range counts {
+		cats = append(cats, c)
+	}
+	sort.Strings(cats)
+
+	out := make([]string, 0, len(cats))
+	for _, c := range cats {
+		n := counts[c]
+		unit := "hostname"
+		if n != 1 {
+			unit = "hostnames"
+		}
+		out = append(out, fmt.Sprintf("%s (%d %s)", c, n, unit))
+	}
+	r.Names = out
+	return r
+}
+
+// hostnameCategory buckets a hostname into a broad, non-identifying category
+// by keyword. This is a heuristic aimed at common cases, not a directory -
+// an unmatched hostname always falls back to "other" rather than guessing
+// further, so an unrecognised provider degrades to a vaguer bucket instead
+// of leaking its name.
+//
+// Ordered most-specific first: a hostname is matched against the narrowest
+// category it fits (icloud.com is "cloud sync/storage", not the broader
+// "Apple services" catch-all further down) rather than whichever case
+// happens to run first, so the two general Apple/Google buckets stay last -
+// they exist so a real provider still reads as identifiable-but-vague
+// ("Apple services") rather than falling all the way to "other", which is
+// where most of a real capture ends up if the specific buckets above them
+// only ever match a handful of textbook domains.
+func hostnameCategory(host string) string {
+	h := strings.ToLower(host)
+	switch {
+	case containsAny(h, "imap", "smtp", "pop3", "mail.", "outlook.", "exchange."):
+		return "mail"
+	case containsAny(h, "icloud", "drive.google", "docs.google", "dropbox", "onedrive", "box.com"):
+		return "cloud sync/storage"
+	case containsAny(h, "push.apple", "courier.push", "gcm-http.googleapis", "fcm.googleapis", "push.services"):
+		return "push notifications"
+	case containsAny(h, "grammarly", "notion.so", "evernote"):
+		return "writing/productivity tools"
+	case containsAny(h, "spotify", "scdn.co", "netflix", "youtube", "music.apple", "music.", "video", "stream"):
+		return "streaming/media"
+	case containsAny(h, "swcdn.apple", "mzstatic", "gvt1.com", "gvt2.com", "update", "cdn", "akamai", "cloudfront", "fastly"):
+		return "software update/delivery"
+	case containsAny(h, "analytics", "telemetry", "metrics", "doubleclick", "googlesyndication", "googleadservices", "sentry", "crashlytics"):
+		return "analytics/telemetry"
+	case containsAny(h, "apple.com", "apple-dns", "aaplimg.com"):
+		return "Apple services"
+	case containsAny(h, "google.com", "googleapis", "gstatic.com", "googleusercontent"):
+		return "Google services"
+	default:
+		return "other"
+	}
+}
+
+func containsAny(s string, subs ...string) bool {
+	for _, sub := range subs {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
 }
 
 // ==== optional capability =================================================

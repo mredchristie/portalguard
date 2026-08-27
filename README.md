@@ -28,14 +28,32 @@ the login to succeed, seals back up, and hands a clean connection to your VPN.
 terms screen.** You log in yourself. Portalguard only controls the firewall
 around that moment.
 
+### Not the same thing as a Wi-Fi password
+
+A network that asks for a WPA password in your Wi-Fi settings has nothing to
+do with Portalguard. That password is checked before you join the network at
+all — once you're on, the internet just works and your VPN connects normally.
+There is no gap to manage.
+
+A captive portal is different: you're already on the network, but a web page
+blocks everything until you log in or click through, often on a network with
+no Wi-Fi password at all (most hotel, café and train Wi-Fi). That's the
+deadlock this tool exists for. Run `detect` if you're not sure which one
+you're looking at — `OPEN_INTERNET` means there's nothing for Portalguard to
+do here.
+
 ## Status
 
-v0.1, in progress. Detection and the state machine work. The macOS pf backend
-is implemented and verified on real hardware: both rulesets parse, `LOCKED_DOWN`
-loads and genuinely blocks, and `make rescue` restores networking. Still to
-come in v0.1 — the full `LOCKED_DOWN → GAP_OPEN → AUTHENTICATED → SEALED` cycle
-driven end to end against the test portal, and the `pflog0` reader behind the
-DNS leak log. Linux and Windows are stubs with their designs recorded but no
+v0.1, working. Detection and the state machine work. The macOS pf backend is
+implemented and verified on real hardware: both rulesets parse, `LOCKED_DOWN`
+loads and genuinely blocks, and `make rescue` restores networking. The full
+`LOCKED_DOWN → GAP_OPEN → AUTHENTICATED → SEALED` cycle is e2e-tested against
+a real portal and real pf. The leak report's counter and hostname layers are
+real and e2e-tested; process attribution is implemented, and confirmed not
+to work on this platform for this rule shape — pf reports a fixed value
+instead of a real pid, verified against ground truth — so the report says
+so rather than guessing. See "The leak report" below.
+Linux and Windows are stubs with their designs recorded but no
 implementation.
 
 ## What it changes on your Mac, in plain terms
@@ -218,29 +236,71 @@ Two honest limitations, both in [`docs/pf-design.md`](docs/pf-design.md):
 
 ## The leak report
 
-When the gap closes, Portalguard says what went through it:
+When the gap closes, Portalguard says what went through it. The report has
+three honest states, and it only ever moves toward saying more once it has
+actually verified that much:
+
+**Counters alone**, when pflog can't be read at all:
 
 ```
-The gap was open for 47s.
-Held back 412 packets (37.2 kB) your machine tried to send while locked down.
-Dropped 133 packets (9.6 kB) the network tried to send you.
-The login page itself accounted for 88 packets (20.9 kB).
-
 46 packets (4.8 kB) went out through the DNS hole, to 192.168.0.1.
 That is packets, not lookups: a query and its reply are counted separately.
 Which hostnames were asked for, and by which processes, is not known:
 that needs packet logging, which was not available for this run.
 ```
 
-The numbers come from pf's own per-rule counters — no packet capture, nothing
-to install, nothing that can be unavailable.
+**Hostnames, from a real run** (`tcpdump`'s own DNS decode, reading a
+dedicated `pflog1` device — no packet capture beyond that, and reading it
+needs no root):
 
-**The report never claims to know more than it does.** The DNS hole in
-`GAP_OPEN` is machine-wide, so background daemons do fire lookups through it,
-and the count above is real. What Portalguard cannot tell you from counters
-alone is *which* hostnames those were — so it says that, rather than showing an
-empty list that reads like an all-clear. Hostname and process detail is the
-`pflog` layer, still to come.
+```
+26 packets (2.8 kB) went out through the DNS hole, to 192.168.0.1.
+That is packets, not lookups: a query and its reply are counted separately.
+Hostnames queried: ssl.gstatic.com, imap.mail.me.com
+The kernel did not attribute these queries to a process.
+```
+
+**Hostnames and processes**, when pf actually attributes a query to a real
+pid. Not the case on this machine today — see below.
+
+The numbers always come from pf's own per-rule counters — no packet capture,
+nothing to install, nothing that can be unavailable. Hostnames are one layer
+past that: real, working, e2e-tested against a real gap. Process attribution
+(*which app* asked) is a third layer past hostnames, and **on this machine
+it confirmed, rather than found a bug to fix**: `pf(4)`'s `log (user)`
+option is real and documented, but on this rule shape (`pass ... keep
+state`, matching the pf backend's DNS gap rules exactly) it does not
+populate a real per-packet pid at all — it reports a fixed value
+unconditionally, every packet, regardless of which process actually sent it.
+That was confirmed against ground truth, not inferred: a capture fired three
+DNS queries from processes whose real pids were captured via `$!` before pf
+or `tcpdump` ever saw the packet, and none of those three real pids ever
+appeared in what pf logged. See [`docs/pf-design.md`](docs/pf-design.md),
+"Resolved: pid 100000 is a kernel sentinel, not a misread", for the full
+capture.
+
+The report distinguishes this from an actual read failure — *"the kernel
+did not say"* is a different and more useful claim than *"we could not
+tell"*, and collapsing them would hide which one is actually true. If a
+future run instead hits a genuine parse problem (the reverse-engineered
+struct offsets breaking on some future macOS) or the heuristic that catches
+one process attributed to implausibly many hostnames, `sudo portalguard run
+-verbose` prints which, tagged `[parse]` or `[heuristic]` — those two need
+opposite fixes, and the report text itself stays free of that detail by
+design either way.
+
+**The report never claims to know more than it does**, in either direction.
+The DNS hole in `GAP_OPEN` is machine-wide, so background daemons do fire
+lookups through it, and every number and hostname above is real, not a
+sample. What it does not do is show an empty list that reads like an
+all-clear, and it does not show a process name it cannot stand behind either.
+
+**`-redact` generalises hostnames for sharing.** `sudo portalguard run
+-redact` turns `Hostnames queried: imap.mail.me.com, ssl.gstatic.com` into
+`Hostnames queried: mail (1 hostname), other (1 hostname)` — broad categories
+instead of the literal domains, so a report can be pasted into a bug report
+or a chat without naming your mail provider or your accounts. The default
+stays full detail, for reading on your own machine.
 
 ## Seeing it for yourself
 

@@ -79,6 +79,29 @@ type Backend struct {
 	// resolvers records who the DNS hole pointed at, for the report.
 	resolvers []net.IP
 
+	// reader tails pflog1 for hostnames and process attribution while the
+	// gap is open. nil until AllowHost successfully wires up logging, and
+	// nil again once Seal or Release has collected its results.
+	reader *logReader
+
+	// leakNames, leakProcesses and leakProcessesUnavailable are the
+	// reader's results, collected once at Seal or Release. They live on the
+	// backend rather than the reader so the report can still be read after
+	// the reader itself has been torn down.
+	leakNames                []string
+	leakProcesses            []string
+	leakProcessesUnavailable bool
+	// leakProcessNote is the tagged diagnostic behind
+	// leakProcessesUnavailable ("[parse] ...", "[heuristic] ..." or
+	// "[kernel] ..."). Carried separately from logNote so it reaches the
+	// Report itself, not only Status() - Status() dies with the process,
+	// the report does not.
+	leakProcessNote string
+	// leakProcessesDeclinedByKernel is true when every attributable record
+	// this run saw was the confirmed kernel "not attributed" sentinel, not
+	// a read failure - see Report.ProcessesDeclinedByKernel.
+	leakProcessesDeclinedByKernel bool
+
 	// exec, when set, replaces the real pfctl and ifconfig invocations.
 	//
 	// It exists so the rule-programming sequence can be tested without root
@@ -145,7 +168,10 @@ func (b *Backend) Release(ctx context.Context) error {
 		}
 	}
 
-	// The log device goes with the rules, and only if it was ours.
+	// Collect whatever the reader found before the device goes: a run torn
+	// down without a seal still gets a report. The log device goes with the
+	// rules, and only if it was ours.
+	b.stopReaderLocked()
 	if err := b.destroyLogInterface(ctx); err != nil {
 		errs = append(errs, err)
 	}
@@ -294,6 +320,18 @@ func (b *Backend) pfctlStdin(ctx context.Context, stdin []byte, args ...string) 
 		return text, fmt.Errorf("pfctl %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(text))
 	}
 	return text, nil
+}
+
+// appendNote adds a non-fatal problem to logNote, keeping any earlier one
+// rather than overwriting it. More than one independent thing can go wrong
+// in a single run - losing an earlier note to a later one would hide it
+// from Status().
+func (b *Backend) appendNote(s string) {
+	if b.logNote == "" {
+		b.logNote = s
+		return
+	}
+	b.logNote += "\n" + s
 }
 
 // isMissingAnchor reports whether a pfctl error just means "that anchor does

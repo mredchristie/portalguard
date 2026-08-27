@@ -221,15 +221,15 @@ macOS will likely prompt to allow incoming connections the first time.
 ## Running the end-to-end test
 
 ```fish
-make build
 make testenv-up
-sudo ./testenv/e2e.sh
+make e2e
 ```
 
-It cuts this machine's network several times, on purpose. Every privileged
-command is echoed before it runs, and the `EXIT` trap flushes the anchor
-whether the run passes, fails, or is interrupted. If something goes wrong
-anyway:
+(`make e2e` depends on `build`, so it always tests the binary it just built,
+not a stale one.) It cuts this machine's network several times, on purpose.
+Every privileged command is echoed before it runs, and the `EXIT` trap
+flushes the anchor whether the run passes, fails, or is interrupted. If
+something goes wrong anyway:
 
 ```fish
 make rescue
@@ -238,6 +238,47 @@ make rescue
 Overridable with environment variables: `GATEWAY` (the off-box target,
 defaults to the default route's gateway), `CONTROL` (a host that must stay
 blocked, default `1.1.1.1`), `PORTAL`, `PROBES`, `WAIT`.
+
+**Recording a run somewhere other than your own reading (e.g. a public
+page) needs `--redact`:** `make e2e-redact`, or `make e2e REDACT=1`. Either
+makes both `PHASE B` and `PHASE D` show categories rather than real
+domains, and every check that depends on redaction having actually taken
+effect verifies it against a ground-truth copy of the report written to a
+file but never printed - refusing to continue rather than let the run
+finish looking safe when it is not.
+
+This has to go through `make`'s own `REDACT=1` variable or the plain
+`sudo ./testenv/e2e.sh --redact` form - never
+`REDACT=1 sudo ./testenv/e2e.sh` by itself. `sudo` resets the environment by
+default, so that form silently drops `REDACT` before the script ever runs -
+confirmed directly (`REDACT=1 sudo sh -c 'echo $REDACT'` prints nothing) -
+and it has already produced one recording that displayed real hostnames
+while claiming to be redacted. `make e2e REDACT=1` is safe specifically
+because `make` expands `REDACT` into a `--redact` **argument** on the
+`sudo ./testenv/e2e.sh` line it runs, before `sudo` is ever invoked -
+arguments survive `sudo`, environment variables generally do not.
+
+## Recording a demo
+
+`e2e.sh` is a test harness - PASS/FAIL lines, phase banners, assertions -
+not what a person using the tool would see. For a recording of the actual
+product flow instead:
+
+```fish
+make testenv-up
+make demo
+```
+
+One command, and nothing to type while it runs: `testenv/demo.sh` resets
+the fixture, schedules the login-page "Accept" click in the background
+(silent - it never interrupts what the recording is showing), and runs
+`portalguard run` in the foreground exactly as a person would type it
+themselves - detect, lock down, gap open, wait, seal, redacted report.
+Compare with `make e2e`: that command backgrounding `sudo` and driving the
+accept step live from the same recorded shell is what caused a visible
+glitch (typing a command over live output) in an earlier take - `demo.sh`
+avoids the whole problem by never backgrounding the privileged command at
+all, only the harmless `curl`.
 
 ## Endpoints
 

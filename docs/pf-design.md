@@ -280,20 +280,36 @@ rules below, so no data leaves. But the *queries* go through, and the portal's
 resolver learns the hostname of every service you use. Hostnames are metadata,
 and metadata is most of what an observer on a hotel network wanted anyway.
 
-Portalguard cannot honestly claim to prevent this in v0.1. What it will do is
+Portalguard cannot honestly claim to prevent this in v0.1. What it does is
 make it visible:
 
-- The DNS pass rules carry `log`, so pf copies matching packets to `pflog0`.
-- A reader on `pflog0` records every query made while the gap is open and
+- The DNS pass rules carry `log`, so pf copies matching packets to a
+  dedicated `pflog1`.
+- A reader on `pflog1` records every query made while the gap is open and
   reports it when the gap closes: how many, to whom, and for what names.
 
-So the seal message becomes something like *"gap open for 47 seconds; 23 DNS
-queries leaked to 192.168.1.1 from 6 processes"* - concrete, honest, and the
-best possible argument for keeping GAP_OPEN short. It also happens to be the
-most persuasive thing this tool can put on a screen.
+So the seal message becomes something like *"26 packets went out through the
+DNS hole... Hostnames queried: ssl.gstatic.com, imap.mail.me.com"* - concrete,
+honest, and the best possible argument for keeping `GAP_OPEN` short.
 
-**Not yet implemented.** The `log` keyword is in the ruleset above; the
-`pflog0` reader is the remaining piece of v0.1.
+**Implemented and e2e-tested, in two layers that degrade independently — see
+`internal/firewall/pf/leakreader.go` and the "Verified against a real
+capture" / "A live run tightened this further" sections below for the full
+story:**
+
+- **Hostnames** come from `tcpdump`'s own DNS decode: real, working, proven
+  against a live gap in the e2e suite (PHASE B4).
+- **Process attribution** (which app made a query) is implemented but
+  **currently backs off** rather than report an answer it cannot trust: the
+  uid/pid fields it needs are read from an undocumented, reverse-engineered
+  struct, and a live run produced a wrong-but-plausible-looking value before
+  the sanity checks below caught that class of failure. The report says
+  "process attribution unavailable" rather than naming a process it is not
+  sure of, and `-verbose` prints the specific reason
+  (`Report.ProcessNote`, tagged `[parse]` or `[heuristic]`) for anyone
+  debugging it further. This is the seal message's aspirational
+  *"from 6 processes"* clause, specifically - not yet trustworthy on this
+  machine, unlike the rest of the sentence.
 
 The real fix is v0.2 and it is narrow rather than visible. pf on macOS can
 match on the uid owning an outbound socket:
@@ -801,10 +817,11 @@ both land on the DNS pass rule. The count is roughly twice the number of
 lookups, and the report says "packets, not lookups" rather than letting the
 number read as a query count.
 
-The report degrades in one direction only. With counters alone it says how much
-went through the DNS hole and states plainly that what was asked for is not
-known, and why. It never renders an absent hostname list as an absence of
-leaks:
+The report only ever moves toward saying more once it has verified that
+much - never the other way, and never by implying it. With counters alone it
+says how much went through the DNS hole and states plainly that what was
+asked for is not known, and why. It never renders an absent hostname list as
+an absence of leaks:
 
 ```
 The gap was open for 47s.
@@ -816,8 +833,27 @@ Which hostnames were asked for, and by which processes, is not known:
 that needs packet logging, which was not available for this run.
 ```
 
-When the pflog layer lands, the last two lines are replaced by the hostnames
-and processes, and nothing else about the report changes.
+That is the state with no pflog layer at all. With it, and hostnames trusted
+but process attribution not (the current, real state on this machine), the
+last two lines become:
+
+```
+Hostnames queried: ssl.gstatic.com, imap.mail.me.com
+Which process made these queries could not be determined.
+```
+
+Once process attribution is trusted too, the second line becomes `Asked by:
+...`. Nothing else about the report changes at either step - see
+`internal/firewall/report.go`'s three states and "A live run tightened this
+further" above for why the last step hasn't landed yet.
+
+The hostname list is also the most identifying part of this output - it
+names mail providers, extensions, accounts. `Report.Redact()` (`-redact` on
+`portalguard run`) generalises `Hostnames queried:` to broad categories
+("mail (1 hostname)") for anything meant to be shared; the default stays
+full detail for reading on your own machine. It only touches `Names` -
+process names are left alone, deliberately, since the ask that prompted this
+was specifically about hostnames identifying accounts and providers.
 
 `firewall.Reporter` is an optional interface rather than part of `Backend`, so
 a backend that cannot account for its own traffic is simply not a Reporter -
@@ -841,6 +877,221 @@ Lifecycle, mirroring the pf enable token exactly:
    it.
 4. On any teardown path, including the panic and signal handlers: the same
    destroy-if-ours.
+
+### Verified against a real capture: tcpdump's text does not carry uid/pid
+
+Before writing the reader, a live check (2026-08-27, scoped to the
+`portalguard` anchor, loopback only, no block rules, torn down by a
+`trap cleanup EXIT` covering the anchor flush, `pflog1` destroy and pf
+token release on every exit path): one pf rule —
+`pass out log (all, user, to pflog1) quick inet proto udp to 127.0.0.1
+port 53 keep state` — and one `dig` query against a nonexistent local
+listener, captured with plain `tcpdump -n -i pflog1 -w -`.
+
+The documented invocation reads the hostname fine:
+
+```
+$ tcpdump -n -e -r pgverify.pcap
+03:43:46.045970 rule 0.portalguard.0/0(match): pass out on lo0: 127.0.0.1.52803 > 127.0.0.1.53: 791+ [1au] A? pgverify-test-query.invalid. (56)
+03:43:46.046120 rule 0..0/0(match): pass in on lo0: 127.0.0.1 > 127.0.0.1: ICMP 127.0.0.1 udp port 53 unreachable, length 36
+```
+
+Hostname regex, validated against this line and against `pg-demo/before.pcap`
+(the plain, non-pflog capture used for the demo numbers), which decodes the
+same way: `\b(?:A|AAAA|PTR)\?\s+(\S+)\.\s+\(\d+\)` — group 1, minus the
+trailing root-label dot the query name always carries.
+
+**uid/pid never appear, at any verbosity.** `-v`, `-vv`, and `-vvv` against
+the same capture add IP-header and checksum detail and nothing else; no
+`uid`, no `pid`, anywhere in the text at any level, even though the rule
+carried `log (user)` and pf accepted it without complaint. This is a limit of
+Apple's tcpdump build (4.99.1, Apple version 158), not of pf: the field is
+there, see below.
+
+**It is in the raw record.** `struct pfloghdr` is not in the public macOS
+SDK (`if_pflog.h` is not shipped; checked the CLT SDK directly), so this is
+read from the captured bytes rather than a header file, but it is internally
+consistent on every field that tcpdump's text output lets us cross-check:
+
+| offset (from record start) | bytes (this capture) | value | tcpdump text agrees? |
+|---|---|---|---|
+| 0 | `3d` | length 61 | — (record slot is 64B, padded) |
+| 1 | `02` | af `AF_INET` | yes — `lo0`, IPv4 |
+| 2 | `00` | action `PF_PASS` | yes — "pass" |
+| 3 | `00` | reason `PFRES_MATCH` | yes — "(match)" |
+| 4–19 | `6c6f3000…` | ifname `lo0` | yes |
+| 20–35 | `706f7274616c6775617264…` | ruleset `portalguard` | yes |
+| 36–39 | `00000000` | rulenr 0 | yes — "rule 0" |
+| 44–47 | `f5010000` | **uid 501** | — (matches this shell's real uid, `id` confirms 501) |
+| 48–51 | `a0860100` | **pid 100000** | — assumed this shell's `dig` invocation at the time; **wrong, see below** |
+| 52–55 | `00000000` | rule_uid 0 | yes — rule loaded via `sudo` |
+| 56–59 | `be120100` | rule_pid 70334 | plausible — the `pfctl` invocation that loaded it |
+| 60 | `02` | dir `PF_OUT` | yes — "pass out" |
+| 61–63 | `000000` | pad | — |
+
+uid 501 landing exactly on this shell's own uid, with every other field
+matching what tcpdump already printed independently, is strong enough
+corroboration to trust the offsets — but they are empirical, not a published
+contract. A macOS point release could change them without notice, since
+Apple documents none of this.
+
+**The judgement.** Text-scraping tcpdump is right for hostnames — it is
+public API, stable, and the DNS decode is already correct. It is wrong for
+uid/pid — not merely inconvenient, but the field is absent from the text at
+every verbosity level this build supports. Process attribution needs the raw
+`DLT_PFLOG` record (`tcpdump -n -i pflog1 -w -`, piped and parsed as pcap in
+Go — no cgo, no libpcap, just the documented pcap file format plus this
+empirically-verified 64-byte header), not the text path. That is a
+reasonable place to spend the added parsing complexity for one struct,
+rather than reason to fall back to counters-only for the process half of the
+report — but it is undocumented-ABI risk that a future macOS version could
+break silently, and the reader should treat a header that fails its own
+sanity checks (implausible `length`, unrecognised `af`) as "could not read
+this one" rather than trust it blindly.
+
+### A live run tightened this further: pid was never actually verified
+
+The 2026-08-27 verification above cross-checked **uid** against ground truth
+(this shell's real uid, via `id`) and it landed exactly right. It did not
+do the same for **pid** — 100000 was accepted as "plausible" by eye, not
+checked against the actual pid of the `dig` process at the time. That gap
+showed up the first time the reader ran against a real gap with real,
+varied traffic: every hostname in the report, from what was clearly many
+different processes, came back attributed to the same `pid 100000`. Nothing
+alerted, because nothing was checking - the header's own bounds
+(`length`, `af`, `dir`) were all satisfied; only the *value* was wrong.
+
+Re-examining the two-packet verification capture explains part of it. Packet
+2 there (`rule 0..0/0(match): pass in on lo0` — an ICMP "port unreachable"
+the kernel generated locally, not a real DNS reply) carries **uid
+`7fffffff`**, not the `ffffffff` sentinel this package checks for, alongside
+the *same* `pid 100000` as packet 1. That is consistent with pf reusing
+whatever pid was recorded when the state was created for every packet on
+that state, while a kernel-generated packet with no real owning socket gets
+some other "no info" convention for uid than the one assumed. That is a
+plausible mechanism for one confounded packet, not a full explanation for
+"every packet in a real run collapsed to one pid" — the live run had normal
+DNS replies from a real resolver, not self-generated ICMP, and those would
+be expected to carry a real per-socket pid rather than any sentinel. The
+honest state of this: the *offsets* check out (structurally self-consistent
+with the field-by-field table above, and `uid` is confirmed against ground
+truth), but **pid's value was never actually confirmed against a known real
+pid**, and this is the second time that gap has produced a wrong answer.
+Confirming it properly needs a live capture built to check pid specifically
+— several distinct backgrounded commands, each pid captured via `$!` at
+spawn time, compared against what the reader reports for each. That has not
+been done yet.
+
+Until it has, the reader treats a bad value as a value it cannot trust
+rather than a value to report:
+
+- **pid outside `[1, 99999]`** is rejected outright. Darwin's pid allocator
+  cannot produce a value at or above 99999 — this is a fact about the
+  kernel, not a plausibility judgement, and it is exactly what would have
+  caught 100000 the first time.
+- **uid must resolve to a real account** — `os/user.LookupId`, an actual
+  lookup against the same account database `id` reads, not a range guess.
+  (Confirmed to work without cgo tricks on this build: `CGO_ENABLED=1` by
+  default, and `os/user` needs that to reach macOS's directory service
+  rather than the largely-unused `/etc/passwd`.)
+- **One process across many distinct hostnames is rejected as a whole-run
+  result**, not per packet — this is exactly the shape the live bug
+  produced (one pid, many real hostnames) and cannot be caught by looking
+  at any single record in isolation.
+
+Any of the three clears `Report.ProcessesUnavailable` instead of
+`Report.Processes`, so a run that trips this still reports every hostname it
+found — see `internal/firewall/report.go`'s three states.
+
+### Re-derived: the offsets check out; the diagnostic didn't
+
+The `[parse]` check fired again on a live `en0` run and named `pid 100000` —
+the same value as before, on a real interface this time, not the loopback
+verification. The `-verbose` note included the record's raw bytes:
+`3d 02 00 00 65 6e 30 00 ...` — `3d`=length 61, `02`=af INET, `65 6e 30`="en0".
+Read as "the bytes near the pid field", that looks like a hard misalignment:
+an interface name where a pid should be.
+
+It isn't one, and re-deriving the offsets from scratch is why. Both
+candidate bugs were checked directly rather than re-argued from memory:
+
+- **Field-size arithmetic**, computed fresh rather than eyeballed:
+  `length(1) + af(1) + action(1) + reason(1) + ifname(16) + ruleset(16) +
+  rulenr(4) + subrulenr(4)` sums to exactly **44** before `uid`, and `uid(4)`
+  brings it to exactly **48** before `pid` - matching `pflogOffUID=44` and
+  `pflogOffPID=48` exactly, and the running total (61) matches the `length`
+  byte every capture so far has shown, this one included.
+- **The record-header question** — whether the manual sample and the live
+  reader disagree about including the 16-byte pcap-per-packet header in
+  `payload`. They don't: `readRaw` reads that header into a separate `rec`
+  array *before* allocating `payload`, so `payload[0]` is never touched by
+  it, and the manual derivation separated the same two things by the same
+  16 bytes when it computed the payload's start offset. The bytes above
+  prove it directly - `payload[0]` decodes as `length=61`, and `ifname`
+  starting at `payload[4]` is exactly where the field-size table says it
+  should.
+
+So what actually misled the read: the error message dumped
+`firstBytes(payload, 16)` for *every* kind of failure - the header's
+opening bytes, regardless of which field the check that failed actually
+reads. A pid failure and an af failure looked byte-for-byte identical in
+the diagnostic, because both showed the same fixed window near the front of
+a header that starts the same way every time. Fixed to show the specific
+field's own bytes at its own offset instead (`internal/firewall/pf/leakreader.go`,
+the `pid`/`uid` error branches), with a test
+(`TestParsePflogRecordRejectionShowsTheFieldItself`) asserting the dump is
+the field, not the header's front.
+
+### Resolved: pid 100000 is a kernel sentinel, not a misread
+
+The open question above - whether `100000` (`pidMax + 1`) is a real "no pid"
+sentinel or a misread - is settled. A 2026-08-31 capture built specifically
+to check pid, not just uid, resolved it:
+
+- Setup: the same single anchor rule as every prior verification (`pass out
+  log (all, user, to pflog1) quick inet proto udp to 127.0.0.1 port 53 keep
+  state`), no block rules, trap-guaranteed teardown.
+- Three `dig` queries, fired sequentially and backgrounded, each real pid
+  captured via `$!` **before** pf or tcpdump ever saw its packet - the
+  actual ground truth, not an assumption: `72837`, `72839`, `72841`.
+- The capture held six records (three queries, three kernel-generated ICMP
+  replies to the closed port). Every one - all six, queries and replies
+  alike - carried **pid 100000**. None of the three real ground-truth pids
+  appeared anywhere in the capture. `uid`, on the same records, was correct
+  throughout: `501` (the real account) on the queries, the `0x7fffffff`
+  sentinel already seen on the kernel-generated replies.
+
+That is conclusive, not merely suggestive: a value that never once matches
+reality across three independent, known-distinct real pids is not a
+misaligned read of a real field - a misalignment would at least occasionally
+produce different-looking garbage as the underlying bytes actually change.
+A perfectly constant value regardless of which real process sent the packet
+is what a deliberate sentinel looks like. **pf on this platform does not
+populate a real per-packet pid for `log (user)` on this rule shape at
+all - it reports `pidMax + 1` unconditionally.**
+
+This is now handled as its own case rather than folded into `[parse]`:
+`internal/firewall/pf/leakreader.go` recognises `pidSentinel` explicitly,
+before the range check ever runs, and does not treat it as a failure - it
+increments a counter and moves on, non-halting, unlike a genuine `[parse]`
+or `[heuristic]` failure. `Stop` reports `ProcessesDeclinedByKernel` when
+every attributable record in the run carried it and nothing else explains
+an empty `Processes` list - a genuine parse or heuristic failure elsewhere
+in the same run still takes priority, since that is more actionable than
+"the kernel declined". The report says so plainly: *"The kernel did not
+attribute these queries to a process."* - a different and more useful claim
+than *"could not be determined"*, and no longer tagged `[parse]`, since
+nothing was misread.
+
+**What this means for v0.1's leak report, plainly:** process attribution
+via `log (user)` does not currently work on this machine, for this rule
+shape, at all - not intermittently, not as a bug to chase further, but as a
+confirmed platform behavior. Hostnames remain real and unaffected: they
+come from a wholly independent mechanism (tcpdump's text decode, not this
+struct), which is exactly the design property "two paths that degrade
+independently" was for. Fixing process attribution for real would need a
+different mechanism than `log (user)` on this rule shape - out of scope for
+this resolution, which was to name the state correctly, not to fix it.
 
 ## Decisions, reviewed and settled
 

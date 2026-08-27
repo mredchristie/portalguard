@@ -184,18 +184,23 @@ func (b *Backend) LeakReport() firewall.Report {
 
 func (b *Backend) reportLocked() firewall.Report {
 	return firewall.Report{
-		GapOpened:         b.gapOpened,
-		GapClosed:         b.gapClosed,
-		BlockedOutPackets: b.counters.blockedOutPkts,
-		BlockedOutBytes:   b.counters.blockedOutBytes,
-		BlockedInPackets:  b.counters.blockedInPkts,
-		BlockedInBytes:    b.counters.blockedInBytes,
-		DNSPackets:        b.counters.dnsPkts,
-		DNSBytes:          b.counters.dnsBytes,
-		PortalPackets:     b.counters.portalPkts,
-		PortalBytes:       b.counters.portalBytes,
-		Resolvers:         b.resolvers,
-		Source:            "pf rule counters, pfctl -a portalguard -s rules -v",
+		GapOpened:                 b.gapOpened,
+		GapClosed:                 b.gapClosed,
+		BlockedOutPackets:         b.counters.blockedOutPkts,
+		BlockedOutBytes:           b.counters.blockedOutBytes,
+		BlockedInPackets:          b.counters.blockedInPkts,
+		BlockedInBytes:            b.counters.blockedInBytes,
+		DNSPackets:                b.counters.dnsPkts,
+		DNSBytes:                  b.counters.dnsBytes,
+		PortalPackets:             b.counters.portalPkts,
+		PortalBytes:               b.counters.portalBytes,
+		Resolvers:                 b.resolvers,
+		Names:                     b.leakNames,
+		Processes:                 b.leakProcesses,
+		ProcessesUnavailable:      b.leakProcessesUnavailable,
+		ProcessesDeclinedByKernel: b.leakProcessesDeclinedByKernel,
+		ProcessNote:               b.leakProcessNote,
+		Source:                    "pf rule counters, pfctl -a portalguard -s rules -v",
 	}
 }
 

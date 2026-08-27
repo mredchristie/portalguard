@@ -44,6 +44,12 @@ func (b *Backend) Lockdown(ctx context.Context) error {
 	b.gapOpened = time.Time{}
 	b.gapClosed = time.Time{}
 	b.resolvers = nil
+	b.reader = nil
+	b.leakNames = nil
+	b.leakProcesses = nil
+	b.leakProcessesUnavailable = false
+	b.leakProcessNote = ""
+	b.leakProcessesDeclinedByKernel = false
 	return nil
 }
 
@@ -71,10 +77,18 @@ func (b *Backend) AllowHost(ctx context.Context, h firewall.Host) error {
 	// leave the user unable to log in at all.
 	g := gapFromHosts(next(b.allowed, h))
 	if created, err := b.ensureLogInterface(ctx); err != nil {
-		b.logNote = fmt.Sprintf("leak logging unavailable: %v", err)
+		b.appendNote(fmt.Sprintf("leak logging unavailable: %v", err))
 	} else {
 		b.logCreated = b.logCreated || created
 		g.logTo = LogInterface
+		if b.reader == nil {
+			reader := newLogReader()
+			if err := reader.Start(ctx); err != nil {
+				b.appendNote(fmt.Sprintf("leak logging unavailable: %v", err))
+			} else {
+				b.reader = reader
+			}
+		}
 	}
 
 	if err := b.loadLocked(ctx, g); err != nil {
@@ -144,8 +158,10 @@ func (b *Backend) Seal(ctx context.Context) error {
 		}
 	}
 
+	b.stopReaderLocked()
+
 	if err := b.destroyLogInterface(ctx); err != nil {
-		b.logNote = err.Error()
+		b.appendNote(err.Error())
 	}
 
 	var failed []string
@@ -161,6 +177,25 @@ func (b *Backend) Seal(ctx context.Context) error {
 			strings.Join(failed, ", "))
 	}
 	return nil
+}
+
+// stopReaderLocked collects the log reader's results, if one is running, and
+// clears it. Called from both Seal and Release, so a run torn down without a
+// seal still gets whatever the reader found before it was cut off.
+func (b *Backend) stopReaderLocked() {
+	if b.reader == nil {
+		return
+	}
+	names, processes, unavailable, note, declinedByKernel := b.reader.Stop()
+	b.leakNames = names
+	b.leakProcesses = processes
+	b.leakProcessesUnavailable = unavailable
+	b.leakProcessNote = note
+	b.leakProcessesDeclinedByKernel = declinedByKernel
+	if note != "" {
+		b.appendNote(note)
+	}
+	b.reader = nil
 }
 
 // openAddrsLocked reads both gap tables out of the kernel. Errors are
@@ -250,7 +285,7 @@ func (b *Backend) enableLocked(ctx context.Context) error {
 		// process cannot drop our pf enable reference - rules still flush,
 		// so the network still comes back.
 		if err := saveToken(b.enableToken); err != nil {
-			b.logNote = fmt.Sprintf("could not persist the pf enable token (%v); `release` from another process will flush rules but leave pf's enable count raised until reboot", err)
+			b.appendNote(fmt.Sprintf("could not persist the pf enable token (%v); `release` from another process will flush rules but leave pf's enable count raised until reboot", err))
 		}
 		return nil
 	}

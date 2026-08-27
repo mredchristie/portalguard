@@ -92,21 +92,21 @@ func run() int {
 func usage(w *os.File) {
 	fmt.Fprintf(w, `portalguard %s - hold the line while you log in to a captive portal
 
-usage: portalguard <command> [flags]
+usage: %s <command> [flags]
 
 commands:
-`, version)
+`, version, invokedAs())
 	for _, c := range commands() {
 		fmt.Fprintf(w, "  %-17s %s\n", c.name, c.summary)
 	}
-	fmt.Fprint(w, `
+	fmt.Fprintf(w, `
 Commands marked (root) program the packet filter and must be run with sudo.
 
 detect exit codes: 0 open internet, 10 captive portal, 20 no network, 1 error.
 
 If portalguard is ever killed hard and your network stays blocked, run:
-  sudo portalguard release
-`)
+  sudo %s release
+`, invokedAs())
 }
 
 // ==== shared helpers ======================================================
@@ -123,13 +123,27 @@ func fail(err error) int {
 	return exitError
 }
 
+// invokedAs is how this process was actually run: a relative path
+// (./bin/portalguard), a bare name if the shell found it on PATH, or
+// whatever else os.Args[0] holds. Every suggested next command in this
+// program builds on this rather than the literal string "portalguard",
+// because the common case - a binary that was `go build`'t locally and
+// never `make install`'d - has nothing named "portalguard" on PATH at all,
+// and a suggestion that fails with "command not found" is worse than no
+// suggestion. This bit a real recording: the tool told the user to run
+// `sudo portalguard release`, which does not exist, right after they had
+// run `sudo ./bin/portalguard run`.
+func invokedAs() string {
+	return os.Args[0]
+}
+
 // requireRoot reports a clear, actionable message when a privileged command is
 // run without sudo, rather than letting pfctl fail obscurely.
 func requireRoot(cmd string) error {
 	if os.Geteuid() == 0 {
 		return nil
 	}
-	return fmt.Errorf("`portalguard %s` programs the packet filter and needs root: try `sudo portalguard %s`", cmd, cmd)
+	return fmt.Errorf("`%s %s` programs the packet filter and needs root: try `sudo %s %s`", invokedAs(), cmd, invokedAs(), cmd)
 }
 
 // hint adds an actionable next step to the errors a user is most likely to

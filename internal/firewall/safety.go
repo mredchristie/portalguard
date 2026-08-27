@@ -81,7 +81,7 @@ func (s *SafetyNet) Release() {
 		// This is the one failure the user must never miss: it means the
 		// machine may still be locked down.
 		s.logf("FIREWALL RELEASE FAILED: %v", err)
-		s.logf("run `sudo portalguard release` (or `sudo pfctl -a portalguard -F all`) to restore networking")
+		s.logf("run `sudo %s release` (or `sudo pfctl -a portalguard -F all`) to restore networking", os.Args[0])
 	}
 }
 

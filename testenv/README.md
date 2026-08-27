@@ -5,12 +5,12 @@ without going to a cafe and without a real network to break.
 
 It has two parts:
 
-- **`portal-web`** — an HTTP server that intercepts every request until
+- **`portal-web`** - an HTTP server that intercepts every request until
   somebody clicks **Accept**, then answers the well-known probe endpoints
   honestly. It serves `/hotspot-detect.html` and `/generate_204` on the same
   paths the real endpoints use, so a probe list can be aimed at it by changing
   only the host.
-- **`dnsmasq`** — a resolver that answers *every* query with the portal's
+- **`dnsmasq`** - a resolver that answers *every* query with the portal's
   address, which is what hotel networks do and what Portalguard's DNS hijack
   check is written to catch.
 
@@ -22,7 +22,7 @@ test is deliberately split, because on this Mac it cannot be otherwise.
 ### Why it is split
 
 A container runtime on macOS cannot give you a portal that is genuinely off-box
-from the Mac's point of view. podman (and Docker Desktop — same architecture)
+from the Mac's point of view. podman (and Docker Desktop - same architecture)
 publishes ports through a helper process running *on the Mac*, and BSD routes
 every local address through `lo0`:
 
@@ -33,8 +33,8 @@ $ route -n get 192.168.0.56        # this Mac's own LAN address
 ```
 
 That `LOCAL` flag is the kernel's own forwarding decision, and it is what pf
-matches `on lo0` against. So `pass quick on lo0 all` — a rule the lockdown
-cannot do without — would let any test against the container pass **without the
+matches `on lo0` against. So `pass quick on lo0 all` - a rule the lockdown
+cannot do without - would let any test against the container pass **without the
 gap rules doing anything at all**. A green run would prove nothing.
 
 ### The split
@@ -45,7 +45,7 @@ gap rules doing anything at all**. A green run would prove nothing.
 | **portal semantics** | the container | `lo0` | Redirect is detected, host is extracted, accept flips detection to open |
 
 The pf half uses the default gateway as a stand-in portal. It answers HTTP, it
-is reached over `en0`, and it has exactly a real captive portal's topology —
+is reached over `en0`, and it has exactly a real captive portal's topology -
 on most hotel and home networks the portal *is* the gateway.
 
 **The gateway is a read-only target.** The test sends it HTTP GETs and nothing
@@ -60,7 +60,7 @@ env PORTAL_URL=http://192.168.0.1/ podman compose up -d --force-recreate portal
 ```
 
 Detection then probes the container over `lo0`, reads a redirect to
-`192.168.0.1`, and pins the gap to that address — which is off-box. One flow,
+`192.168.0.1`, and pins the gap to that address - which is off-box. One flow,
 both halves, each doing the part it can honestly do.
 
 ### What is still not covered
@@ -83,7 +83,7 @@ surface detection reads, so `portalguard detect` exercises its real code path
 end to end.
 
 It does **not** route traffic, so clicking Accept does not literally open a
-gateway — it makes the probe endpoints stop lying. Testing that traffic is
+gateway - it makes the probe endpoints stop lying. Testing that traffic is
 genuinely blocked needs the pf backend and a real network; this environment
 tests detection and the state transitions around it.
 
@@ -178,7 +178,7 @@ and just aim the probes at the portal.
 To exercise the DNS hijack check you need the resolver on port 53, because
 macOS's DNS settings have no port field. Two options:
 
-1. Run dnsmasq on port 53 — `DNS_PORT=53` in `.env`. Rootless podman cannot
+1. Run dnsmasq on port 53 - `DNS_PORT=53` in `.env`. Rootless podman cannot
    bind ports below 1024, so this needs Docker Desktop or a rootful podman
    machine.
 2. Query it directly without changing system DNS, which is enough to confirm
@@ -193,7 +193,7 @@ macOS's DNS settings have no port field. Two options:
    Portalguard's hijack check makes: a name under `.invalid` that must not
    resolve.
 
-Then point macOS at it — **System Settings → Network → Wi-Fi → Details → DNS**,
+Then point macOS at it - **System Settings → Network → Wi-Fi → Details → DNS**,
 set `127.0.0.1`, and note the previous values so you can put them back. This
 does affect the whole machine, so undo it when you are finished:
 
@@ -212,7 +212,7 @@ networking:
    stack up.
 2. On the phone or laptop, set DNS manually to the Mac's LAN address.
 3. Browse to anything. Every name resolves to the Mac, the portal intercepts,
-   and the login page appears — the same experience as a hotel network.
+   and the login page appears - the same experience as a hotel network.
 4. Point Portalguard at it from that device, or from the Mac with
    `-probe no_content=http://<mac-ip>:8080/generate_204`.
 

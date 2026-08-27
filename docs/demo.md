@@ -9,7 +9,7 @@ line.
 The leak this tool exists to stop is **not caused by the captive portal**. It is
 caused by the tunnel going down. The moment the default route stops pointing
 into `utun`, every background daemon that has been waiting notices the change
-and reconnects — and their DNS goes out in plaintext over `en0`, on whatever
+and reconnects - and their DNS goes out in plaintext over `en0`, on whatever
 network you happen to be on.
 
 A captive portal only makes it *worse*, by forcing you to hold that state for
@@ -31,7 +31,7 @@ Three things keep it proportionate:
   kernel, so nothing else is ever written to disk. You are collecting query
   metadata, not traffic content.
 - **Keep it out of the repo.** `~/pg-demo/` below, and `.gitignore` already
-  excludes nothing there — do not move it into the working tree.
+  excludes nothing there - do not move it into the working tree.
 - **Sanitise before showing anyone.** The counts and the shape are the
   interesting part; the specific hostnames are yours. There is a redaction step
   at the end.
@@ -51,7 +51,7 @@ Start the capture and leave it running:
 tcpdump -i en0 -n -w ~/pg-demo/before.pcap 'udp port 53'
 ```
 
-In the NordVPN app: **disconnect**. Wait 30 seconds — that is roughly how long
+In the NordVPN app: **disconnect**. Wait 30 seconds - that is roughly how long
 it takes for the reconnect stampede to play out. Then reconnect, and stop the
 capture with Ctrl-C.
 
@@ -68,14 +68,14 @@ tcpdump -r ~/pg-demo/before.pcap -n 2>/dev/null | wc -l
 tcpdump -r ~/pg-demo/before.pcap -n 2>/dev/null | grep -oE 'A\? [^ ]+' | sort -u | wc -l
 ```
 
-The second number — distinct hostnames — is the one that lands. Every name on
+The second number - distinct hostnames - is the one that lands. Every name on
 that list is a service you use, disclosed in plaintext to whoever runs the
 network.
 
 ## After: Portalguard holding the line
 
 Disconnect the VPN and leave it disconnected. Portalguard refuses to engage
-while a tunnel owns the default route, and this is why — it is meant to hold
+while a tunnel owns the default route, and this is why - it is meant to hold
 the gap the VPN is absent from.
 
 ```fish
@@ -108,7 +108,7 @@ Compare:
 tcpdump -r ~/pg-demo/after.pcap -n 2>/dev/null | wc -l
 ```
 
-Zero. The queries were still made — the same daemons still tried — but the
+Zero. The queries were still made - the same daemons still tried - but the
 packets never reached the wire. The `block drop out` rule's `Packets:` counter
 in the `pfctl` output above is how many were stopped.
 
@@ -140,7 +140,7 @@ name with a **category, not a product**:
 ```
 
 Not `imap.mail.me.com`, and not `<iCloud Mail>` either. The same rule applies
-to process names if you ever show the enriched report — `<mail client>`, not
+to process names if you ever show the enriched report - `<mail client>`, not
 the application's name.
 
 Two reasons. Naming products turns a demonstration of a general problem into a
@@ -167,8 +167,8 @@ shows and what the tool claims is where credibility goes.
   nobody is being redirected to a login page. The portal makes the exposure
   window longer; it does not create it.
 - **The `GAP_OPEN` phase is not demonstrated.** This shows lockdown versus no
-  lockdown. It does not show the harder claim — that the gap lets the login
-  page through and nothing else — because that needs a real portal.
+  lockdown. It does not show the harder claim - that the gap lets the login
+  page through and nothing else - because that needs a real portal.
 - **The test portal cannot stand in.** `testenv/` simulates a portal's
   *answers*, not its gating, and it sits on `lo0` where the loopback pass rule
   makes any firewall test vacuous. See `testenv/README.md`.
@@ -180,11 +180,11 @@ Two things, neither of which is worth building speculatively:
 1. **A second device on the LAN.** With a Pi or a spare laptop running
    `go run ./testenv/portal-web`, the portal becomes genuinely off-box, the
    gateway split in `testenv/README.md` disappears, and `GAP_OPEN` can be
-   demonstrated properly — portal reachable, everything else blocked, in one
+   demonstrated properly - portal reachable, everything else blocked, in one
    capture.
 
 2. **`portalguard release` does not print the leak report.** Only `run` does,
    at seal. So the lockdown-only demo above has to read raw counters with
    `pfctl -s rules -v` instead of getting the formatted report. That is a small
    change to `runRelease`, but it is a change, and this session is not for
-   features — noting it rather than doing it.
+   features - noting it rather than doing it.

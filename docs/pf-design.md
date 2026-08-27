@@ -18,7 +18,7 @@ signed off.
 Every rule Portalguard installs goes into a single pf anchor named
 `portalguard`. An anchor is a named, nested ruleset: it can be loaded, listed
 and flushed as a unit, and flushing it cannot affect anything else on the
-system. That property is the whole basis of the fail-safe promise —
+system. That property is the whole basis of the fail-safe promise -
 `pfctl -a portalguard -F all` is a complete, targeted undo.
 
 The alternative, writing into the main ruleset, would mean our teardown had to
@@ -46,7 +46,7 @@ the main ruleset references it. So this:
 sudo pfctl -a portalguard -f my-rules.conf
 ```
 
-succeeds, reports no error, stores the rules — and filters nothing at all,
+succeeds, reports no error, stores the rules - and filters nothing at all,
 because no `anchor "portalguard"` line exists for the kernel to reach them
 through.
 
@@ -114,7 +114,7 @@ Two things about the placement, both load-bearing:
    not already exist.
 2. Insert the marked block above.
 3. Validate without loading: `pfctl -n -f /etc/pf.conf`. **If this fails,
-   restore the backup and abort** — an invalid `pf.conf` is a bad thing to
+   restore the backup and abort** - an invalid `pf.conf` is a bad thing to
    leave on disk for the next boot.
 4. Load it: `pfctl -f /etc/pf.conf`.
 
@@ -158,8 +158,8 @@ Two rulesets, one per phase. Each is generated in memory and loaded whole:
 sudo pfctl -a portalguard -f -   # ruleset text on stdin
 ```
 
-Loading a ruleset into an anchor is atomic — there is no moment where the old
-rules are gone and the new ones have not arrived — so a phase change cannot
+Loading a ruleset into an anchor is atomic - there is no moment where the old
+rules are gone and the new ones have not arrived - so a phase change cannot
 leak through a gap between rulesets. Nothing is ever written to disk.
 
 One constraint that shapes both: **`set` statements are not legal inside an
@@ -209,8 +209,8 @@ mDNS/Bonjour, no AirDrop.
 `block drop` rather than `block return`: a portal probing us learns nothing
 from silence, and dropping is what a hostile network expects to see anyway.
 
-Blocking inbound as well as outbound costs nothing here — we are on an
-untrusted network for a few minutes — and stops the machine answering
+Blocking inbound as well as outbound costs nothing here - we are on an
+untrusted network for a few minutes - and stops the machine answering
 anything on it. Return traffic for our own connections is unaffected, because
 pf checks the state table before the ruleset, and the gap's pass rules keep
 state.
@@ -255,7 +255,7 @@ block drop in  quick all
 ```
 
 The portal port from detection is added to the port list when it is not
-already 80 or 443 — the `8080` above is the test environment's.
+already 80 or 443 - the `8080` above is the test environment's.
 
 Note what the gap does *not* include: no ICMP, no UDP except DNS to those
 resolvers, no other host, no other port. A portal that needs more (a payment
@@ -292,7 +292,7 @@ So the seal message becomes something like *"26 packets went out through the
 DNS hole... Hostnames queried: ssl.gstatic.com, imap.mail.me.com"* - concrete,
 honest, and the best possible argument for keeping `GAP_OPEN` short.
 
-**Implemented and e2e-tested, in two layers that degrade independently — see
+**Implemented and e2e-tested, in two layers that degrade independently - see
 `internal/firewall/pf/leakreader.go` and the "Verified against a real
 capture" / "A live run tightened this further" sections below for the full
 story:**
@@ -326,13 +326,13 @@ the login page itself.
 
 Addresses are **pinned at detection time**. The gap is written against the IPs
 the portal resolved to when we probed, not against a hostname. Otherwise a
-portal that controls DNS — which, per the hijack check, it usually does —
+portal that controls DNS - which, per the hijack check, it usually does -
 could point its own name anywhere it liked after we opened the hole.
 
 ### Seal
 
 Seal reloads the LOCKED_DOWN ruleset, which drops the pass rules. That closes
-the hole for new connections — but it does not, on its own, drop the tables or
+the hole for new connections - but it does not, on its own, drop the tables or
 the existing states, and both of those need handling explicitly.
 
 Existing states created while the gap was open survive a rule change, so seal
@@ -351,14 +351,14 @@ sudo pfctl -a portalguard -F Tables
 **This is not optional, and leaving it out was a real bug.** pf tables are
 declared `persist`, which means they survive a ruleset that no longer
 references them. Reloading the lockdown ruleset removes the pass rules but
-leaves `<pg_portal>` holding the portal's address — permission revoked, record
+leaves `<pg_portal>` holding the portal's address - permission revoked, record
 retained. An end-to-end run caught it: `pg_portal` still held the gateway after
 the seal.
 
 Two behaviours were possible and the choice matters, so it is recorded here:
 
-- **(a) Seal flushes the tables.** Table contents then mean exactly one thing —
-  the set of addresses currently permitted — at every point in the lifecycle.
+- **(a) Seal flushes the tables.** Table contents then mean exactly one thing -
+  the set of addresses currently permitted - at every point in the lifecycle.
 - **(b) Tables persist to release as a record of what was pinned.** Then
   "what is in the table" and "what is permitted" are different questions with
   different answers, and every consumer has to know which one it is asking.
@@ -366,8 +366,8 @@ Two behaviours were possible and the choice matters, so it is recorded here:
 **(a) is correct**, for a reason that is not just tidiness: nothing needs the
 record. Seal's own state kills read the addresses out before flushing, and a
 re-opened gap re-pins from a fresh detection. (b) would keep a second source of
-truth alive with no consumer, and the first thing to read it — a menu bar UI
-showing "currently allowed" — would render a sealed machine as still letting
+truth alive with no consumer, and the first thing to read it - a menu bar UI
+showing "currently allowed" - would render a sealed machine as still letting
 the portal through.
 
 ### The tables are never the source of truth
@@ -387,7 +387,7 @@ the rules actually reference them.**
 
 Rules are the only thing that filters packets, so they are the only honest
 answer to "is anything permitted". A populated table with no rule pointing at
-it permits nothing, and `status` now says so — it reports the phase as
+it permits nothing, and `status` now says so - it reports the phase as
 `LOCKED`, reports nothing as allowed, and adds a note that there is residue to
 clear. That holds however the residue got there.
 
@@ -445,7 +445,7 @@ curl -m 5 http://example.com            # timed out at the TCP layer, as designe
 make rescue                             # network restored
 ```
 
-Both phases parse, LOCKED_DOWN loads and genuinely blocks — `curl` timed out at
+Both phases parse, LOCKED_DOWN loads and genuinely blocks - `curl` timed out at
 the TCP layer rather than failing at DNS, which is the right shape: the block
 rule is dropping packets, not merely breaking name resolution. `make rescue`
 restored networking.
@@ -476,7 +476,7 @@ generator's output is only the request.
 This does not bite today, because the current ruleset is a set of `quick` rules
 with disjoint match criteria: exactly one can match any given packet, so the
 order they end up in cannot change the outcome. It would bite the moment we add
-two rules that can both match the same packet — say a broad `pass` and a
+two rules that can both match the same packet - say a broad `pass` and a
 narrower `block` over the same addresses. At that point the reviewed reading
 order in this document would stop describing what the kernel does.
 
@@ -509,7 +509,7 @@ it can program pf and the routing table), and `WireGuard.app` are all running,
 and the default route points into `utun7` at `10.5.0.2`.
 
 Nord's kill switch is the direct conflict. It works the same way Portalguard's
-lockdown does — block everything, permit the tunnel — and two independent
+lockdown does - block everything, permit the tunnel - and two independent
 tools both asserting "block everything except my thing" over the same
 interface produce whichever result the rule ordering happens to give. That is
 not something to reason about live on a hotel network.
@@ -538,7 +538,7 @@ useless to anyone whose VPN is not Nord, but it is opt-in and loud.
 ### How to detect it, and how not to
 
 Not by looking for an interface that is up. **Eight `utun` interfaces are UP
-and RUNNING on this Mac right now** — `utun0` through `utun7`. Seven of them
+and RUNNING on this Mac right now** - `utun0` through `utun7`. Seven of them
 are macOS's own: iCloud Private Relay, Back to My Mac, and friends. They are
 up on every Mac, all the time, and a check for "any utun is UP" would refuse
 to run on every machine in the world.
@@ -550,7 +550,7 @@ The test that actually distinguishes a VPN:
 2. If it is a `utun`/`ipsec`/`ppp` interface **and** that interface has an IP
    address assigned, a tunnel owns this machine's traffic.
 
-`utun7` passes both — it has `inet 10.5.0.2` and holds the default route.
+`utun7` passes both - it has `inet 10.5.0.2` and holds the default route.
 `utun0`–`utun6` have no address at all and fail the first test.
 
 Secondary signals worth logging but not deciding on: `com.nordvpn.macos.helper`
@@ -564,11 +564,11 @@ treats as suspicious when a *probe hostname* resolves into it. The check only
 flags the addresses public hostnames resolve *to*, not the resolver's own
 address, so this does not misfire today. But if Nord's Threat Protection ever
 answers `captive.apple.com` from CGNAT space, detection would report a hijack
-that is really just the VPN. Another reason v0.1 tests with Nord off — and a
+that is really just the VPN. Another reason v0.1 tests with Nord off - and a
 note for whoever adds "detect the portal from inside a half-up tunnel" later.
 
 **Handoff is not leak-free yet.** `HANDED_OFF` releases our rules and then the
-user brings the VPN up, which leaves a brief unprotected window — a smaller
+user brings the VPN up, which leaves a brief unprotected window - a smaller
 version of the problem this tool exists to solve. The fix, for v0.2, is to
 keep the lockdown in place and add a pass rule for the VPN's server endpoint,
 so traffic goes from "blocked" to "blocked except the tunnel" to "the tunnel
@@ -600,7 +600,7 @@ thinking, which is the state you will be in when you need it.
 
 Where it is documented, so it can be found without this file:
 
-- **README.md**, in the "Failing safe" section at the end — the last thing on
+- **README.md**, in the "Failing safe" section at the end - the last thing on
   the page.
 - **`portalguard --help`**, as the closing line of the usage text.
 - **The Makefile**, as `make rescue`, with a comment.
@@ -618,7 +618,7 @@ What catches what:
 The last row is the point of never writing a ruleset to disk: the worst case
 recovers by turning it off and on again.
 
-A watchdog would close the `kill -9` gap — a detached helper, or a launchd
+A watchdog would close the `kill -9` gap - a detached helper, or a launchd
 job, that flushes the anchor if the main process stops checking in. Worth
 doing before this is something anyone else runs; not v0.1.
 
@@ -630,13 +630,13 @@ pf lives behind `/dev/pf`, which is root-only. There is no entitlement or
 group that avoids it; that is the price of using pfctl instead of a Network
 Extension for v0.1.
 
-**Never needs sudo** — these are the ones you will run most:
+**Never needs sudo** - these are the ones you will run most:
 
 | Command                     | Why it is safe                          |
 | --------------------------- | --------------------------------------- |
 | `portalguard detect`        | HTTP requests and DNS lookups only      |
-| `portalguard version`       | —                                       |
-| `make build`, `make test`   | —                                       |
+| `portalguard version`       | -                                       |
+| `make build`, `make test`   | -                                       |
 | `go run ./testenv/portal-web` | Binds 8080, an unprivileged port      |
 
 **Needs sudo, once, at install time:**
@@ -655,14 +655,14 @@ Extension for v0.1.
 | `sudo portalguard seal`       | `-a portalguard -f -`, `-k`                          |
 | `sudo portalguard release`    | `-a portalguard -F rules -F Tables`, `-X <token>`    |
 | `sudo portalguard run`        | all of the above                                     |
-| `sudo portalguard status`     | `-a portalguard -s rules` — read-only, but `/dev/pf` still needs root |
+| `sudo portalguard status`     | `-a portalguard -s rules` - read-only, but `/dev/pf` still needs root |
 | `make rescue`                 | `-a portalguard -F all`                              |
 
 `status` without sudo degrades honestly rather than failing: it reports the
 backend and prints `pf requires root: re-run with sudo` instead of guessing.
 
 A menu bar app cannot ask for sudo on every click, so v0.2 will need a
-privileged helper installed via `SMAppService` — the same shape as
+privileged helper installed via `SMAppService` - the same shape as
 `com.nordvpn.macos.helper`. The CLI's `sudo` requirement is a v0.1 shortcut,
 not the eventual design.
 
@@ -687,7 +687,7 @@ It is not missing because something is broken. `pflog(4)` is a *pseudo-device*:
 > using ifconfig(8).
 
 Nothing on macOS creates one for you. The only thing the system does with pf at
-boot is `com.apple.pfctl.plist`, which runs exactly `pfctl -f /etc/pf.conf` —
+boot is `com.apple.pfctl.plist`, which runs exactly `pfctl -f /etc/pf.conf` -
 it loads the ruleset and creates no interfaces. Enabling pf does not create one
 either; the interface and the filter are independent.
 
@@ -698,7 +698,7 @@ sudo ifconfig pflog0 create
 sudo ifconfig pflog0 up
 ```
 
-and destroy it on teardown — but **only if we created it**. Another tool may
+and destroy it on teardown - but **only if we created it**. Another tool may
 already be logging to pflog0, and destroying its interface is the same class of
 mistake as `pfctl -d` would be. The rule is the one we already apply to the pf
 enable token: record whether it existed before we touched it, and put it back
@@ -730,7 +730,7 @@ unprivileged for as long as the gap is open.
 Counting and content are separate problems, and conflating them would make us
 build the expensive thing for both.
 
-**Counts come from pf's own rule statistics — no pflog, no capture, no BPF:**
+**Counts come from pf's own rule statistics - no pflog, no capture, no BPF:**
 
 ```fish
 sudo pfctl -a portalguard -s rules -v
@@ -746,21 +746,21 @@ load. Two caveats from the same man page, both of which we have to respect:
 - The kernel's skip-step optimisation can skip evaluating a rule, so the
   *evaluations* column undercounts. Packets and bytes for rules that did match
   are real.
-- "Packets passed statefully are counted in the rule that created the state" —
+- "Packets passed statefully are counted in the rule that created the state" -
   which is what we want, since it attributes the whole conversation to the gap
   rule that permitted it.
 
 **Content and attribution need pflog:** which hostnames were queried, and by
 what. There is no way to get that from a counter.
 
-### Two ruleset changes this needs — not yet applied
+### Two ruleset changes this needs - not yet applied
 
 Both change rules that were reviewed in section 2, so they are recorded here
 rather than made.
 
 **1. The DNS rules need `log (all)`, not bare `log`.** From `pf.conf(5)`:
 
-> log — In addition to the action specified, a log message is generated. **Only
+> log - In addition to the action specified, a log message is generated. **Only
 > the packet that establishes the state is logged**, unless the no state option
 > is specified.
 
@@ -768,7 +768,7 @@ Our DNS rules use `keep state`. A resolver that opens a fresh socket per query
 creates a new state per query, so each one gets logged and bare `log` would be
 fine. But macOS's own resolver does not work that way: `mDNSResponder`
 multiplexes queries over long-lived sockets. One state, one log line, and every
-subsequent query — the ones we most want to count — invisible.
+subsequent query - the ones we most want to count - invisible.
 
 That is precisely the failure where the leak report would read "1 query" during
 a gap that leaked fifty. `log (all)` forces logging of every packet in the
@@ -776,7 +776,7 @@ connection and fixes it.
 
 **2. `log (user)` gives us the process attribution for free.**
 
-> log (user) — Logs the UNIX user ID of the user that owns the socket and the
+> log (user) - Logs the UNIX user ID of the user that owns the socket and the
 > PID of the process that has the socket open [...] in addition to the normal
 > information logged.
 
@@ -790,7 +790,7 @@ pass out log (all, user) quick inet6 proto { tcp, udp } to <pg_dns> port 53 keep
 ```
 
 **3. Counting blocked packets during lockdown needs nothing.** The block rules
-stay exactly as reviewed — no `log` on them. Their packet counters already
+stay exactly as reviewed - no `log` on them. Their packet counters already
 answer "how much was held back", and logging every dropped packet on a hostile
 network is a good way to fill a disk for no benefit.
 
@@ -806,13 +806,13 @@ get wrong:
 **Counters reset on every ruleset reload.** Portalguard reloads at each phase
 change, so lockdown's counts are destroyed the instant the gap ruleset lands.
 Reading the counters once at the end would report only what happened since the
-last reload, and would show zero packets blocked during lockdown — a
+last reload, and would show zero packets blocked during lockdown - a
 comfortable, wrong answer. Totals are therefore sampled immediately *before*
 every reload and accumulated. The sampling lives inside the single function
 that reloads rules, rather than at each call site where it could be forgotten.
 
 **Counters are packets, not lookups.** `pfctl(8)`: "Packets passed statefully
-are counted in the rule that created the state" — so a DNS query and its reply
+are counted in the rule that created the state" - so a DNS query and its reply
 both land on the DNS pass rule. The count is roughly twice the number of
 lookups, and the report says "packets, not lookups" rather than letting the
 number read as a query count.
@@ -862,7 +862,7 @@ quiet network. The CLI says so explicitly when a report comes back empty.
 
 ### Implementation shape
 
-`tcpdump` is at `/usr/sbin/tcpdump` and reads pflog natively — the pflog link
+`tcpdump` is at `/usr/sbin/tcpdump` and reads pflog natively - the pflog link
 type carries the action, the rule number and the interface, which is why
 `tcpdump -n -e -ttt -i pflog1` is the documented invocation. Shelling out to it
 keeps the module's zero-dependency record intact; the alternative is cgo and
@@ -883,9 +883,9 @@ Lifecycle, mirroring the pf enable token exactly:
 Before writing the reader, a live check (2026-08-27, scoped to the
 `portalguard` anchor, loopback only, no block rules, torn down by a
 `trap cleanup EXIT` covering the anchor flush, `pflog1` destroy and pf
-token release on every exit path): one pf rule —
+token release on every exit path): one pf rule -
 `pass out log (all, user, to pflog1) quick inet proto udp to 127.0.0.1
-port 53 keep state` — and one `dig` query against a nonexistent local
+port 53 keep state` - and one `dig` query against a nonexistent local
 listener, captured with plain `tcpdump -n -i pflog1 -w -`.
 
 The documented invocation reads the hostname fine:
@@ -898,7 +898,7 @@ $ tcpdump -n -e -r pgverify.pcap
 
 Hostname regex, validated against this line and against `pg-demo/before.pcap`
 (the plain, non-pflog capture used for the demo numbers), which decodes the
-same way: `\b(?:A|AAAA|PTR)\?\s+(\S+)\.\s+\(\d+\)` — group 1, minus the
+same way: `\b(?:A|AAAA|PTR)\?\s+(\S+)\.\s+\(\d+\)` - group 1, minus the
 trailing root-label dot the query name always carries.
 
 **uid/pid never appear, at any verbosity.** `-v`, `-vv`, and `-vvv` against
@@ -915,36 +915,36 @@ consistent on every field that tcpdump's text output lets us cross-check:
 
 | offset (from record start) | bytes (this capture) | value | tcpdump text agrees? |
 |---|---|---|---|
-| 0 | `3d` | length 61 | — (record slot is 64B, padded) |
-| 1 | `02` | af `AF_INET` | yes — `lo0`, IPv4 |
-| 2 | `00` | action `PF_PASS` | yes — "pass" |
-| 3 | `00` | reason `PFRES_MATCH` | yes — "(match)" |
+| 0 | `3d` | length 61 | - (record slot is 64B, padded) |
+| 1 | `02` | af `AF_INET` | yes - `lo0`, IPv4 |
+| 2 | `00` | action `PF_PASS` | yes - "pass" |
+| 3 | `00` | reason `PFRES_MATCH` | yes - "(match)" |
 | 4–19 | `6c6f3000…` | ifname `lo0` | yes |
 | 20–35 | `706f7274616c6775617264…` | ruleset `portalguard` | yes |
-| 36–39 | `00000000` | rulenr 0 | yes — "rule 0" |
-| 44–47 | `f5010000` | **uid 501** | — (matches this shell's real uid, `id` confirms 501) |
-| 48–51 | `a0860100` | **pid 100000** | — assumed this shell's `dig` invocation at the time; **wrong, see below** |
-| 52–55 | `00000000` | rule_uid 0 | yes — rule loaded via `sudo` |
-| 56–59 | `be120100` | rule_pid 70334 | plausible — the `pfctl` invocation that loaded it |
-| 60 | `02` | dir `PF_OUT` | yes — "pass out" |
-| 61–63 | `000000` | pad | — |
+| 36–39 | `00000000` | rulenr 0 | yes - "rule 0" |
+| 44–47 | `f5010000` | **uid 501** | - (matches this shell's real uid, `id` confirms 501) |
+| 48–51 | `a0860100` | **pid 100000** | - assumed this shell's `dig` invocation at the time; **wrong, see below** |
+| 52–55 | `00000000` | rule_uid 0 | yes - rule loaded via `sudo` |
+| 56–59 | `be120100` | rule_pid 70334 | plausible - the `pfctl` invocation that loaded it |
+| 60 | `02` | dir `PF_OUT` | yes - "pass out" |
+| 61–63 | `000000` | pad | - |
 
 uid 501 landing exactly on this shell's own uid, with every other field
 matching what tcpdump already printed independently, is strong enough
-corroboration to trust the offsets — but they are empirical, not a published
+corroboration to trust the offsets - but they are empirical, not a published
 contract. A macOS point release could change them without notice, since
 Apple documents none of this.
 
-**The judgement.** Text-scraping tcpdump is right for hostnames — it is
+**The judgement.** Text-scraping tcpdump is right for hostnames - it is
 public API, stable, and the DNS decode is already correct. It is wrong for
-uid/pid — not merely inconvenient, but the field is absent from the text at
+uid/pid - not merely inconvenient, but the field is absent from the text at
 every verbosity level this build supports. Process attribution needs the raw
 `DLT_PFLOG` record (`tcpdump -n -i pflog1 -w -`, piped and parsed as pcap in
-Go — no cgo, no libpcap, just the documented pcap file format plus this
+Go - no cgo, no libpcap, just the documented pcap file format plus this
 empirically-verified 64-byte header), not the text path. That is a
 reasonable place to spend the added parsing complexity for one struct,
 rather than reason to fall back to counters-only for the process half of the
-report — but it is undocumented-ABI risk that a future macOS version could
+report - but it is undocumented-ABI risk that a future macOS version could
 break silently, and the reader should treat a header that fails its own
 sanity checks (implausible `length`, unrecognised `af`) as "could not read
 this one" rather than trust it blindly.
@@ -953,7 +953,7 @@ this one" rather than trust it blindly.
 
 The 2026-08-27 verification above cross-checked **uid** against ground truth
 (this shell's real uid, via `id`) and it landed exactly right. It did not
-do the same for **pid** — 100000 was accepted as "plausible" by eye, not
+do the same for **pid** - 100000 was accepted as "plausible" by eye, not
 checked against the actual pid of the `dig` process at the time. That gap
 showed up the first time the reader ran against a real gap with real,
 varied traffic: every hostname in the report, from what was clearly many
@@ -962,7 +962,7 @@ alerted, because nothing was checking - the header's own bounds
 (`length`, `af`, `dir`) were all satisfied; only the *value* was wrong.
 
 Re-examining the two-packet verification capture explains part of it. Packet
-2 there (`rule 0..0/0(match): pass in on lo0` — an ICMP "port unreachable"
+2 there (`rule 0..0/0(match): pass in on lo0` - an ICMP "port unreachable"
 the kernel generated locally, not a real DNS reply) carries **uid
 `7fffffff`**, not the `ffffffff` sentinel this package checks for, alongside
 the *same* `pid 100000` as packet 1. That is consistent with pf reusing
@@ -970,7 +970,7 @@ whatever pid was recorded when the state was created for every packet on
 that state, while a kernel-generated packet with no real owning socket gets
 some other "no info" convention for uid than the one assumed. That is a
 plausible mechanism for one confounded packet, not a full explanation for
-"every packet in a real run collapsed to one pid" — the live run had normal
+"every packet in a real run collapsed to one pid" - the live run had normal
 DNS replies from a real resolver, not self-generated ICMP, and those would
 be expected to carry a real per-socket pid rather than any sentinel. The
 honest state of this: the *offsets* check out (structurally self-consistent
@@ -978,7 +978,7 @@ with the field-by-field table above, and `uid` is confirmed against ground
 truth), but **pid's value was never actually confirmed against a known real
 pid**, and this is the second time that gap has produced a wrong answer.
 Confirming it properly needs a live capture built to check pid specifically
-— several distinct backgrounded commands, each pid captured via `$!` at
+ -  several distinct backgrounded commands, each pid captured via `$!` at
 spawn time, compared against what the reader reports for each. That has not
 been done yet.
 
@@ -986,29 +986,29 @@ Until it has, the reader treats a bad value as a value it cannot trust
 rather than a value to report:
 
 - **pid outside `[1, 99999]`** is rejected outright. Darwin's pid allocator
-  cannot produce a value at or above 99999 — this is a fact about the
+  cannot produce a value at or above 99999 - this is a fact about the
   kernel, not a plausibility judgement, and it is exactly what would have
   caught 100000 the first time.
-- **uid must resolve to a real account** — `os/user.LookupId`, an actual
+- **uid must resolve to a real account** - `os/user.LookupId`, an actual
   lookup against the same account database `id` reads, not a range guess.
   (Confirmed to work without cgo tricks on this build: `CGO_ENABLED=1` by
   default, and `os/user` needs that to reach macOS's directory service
   rather than the largely-unused `/etc/passwd`.)
 - **One process across many distinct hostnames is rejected as a whole-run
-  result**, not per packet — this is exactly the shape the live bug
+  result**, not per packet - this is exactly the shape the live bug
   produced (one pid, many real hostnames) and cannot be caught by looking
   at any single record in isolation.
 
 Any of the three clears `Report.ProcessesUnavailable` instead of
 `Report.Processes`, so a run that trips this still reports every hostname it
-found — see `internal/firewall/report.go`'s three states.
+found - see `internal/firewall/report.go`'s three states.
 
 ### Re-derived: the offsets check out; the diagnostic didn't
 
-The `[parse]` check fired again on a live `en0` run and named `pid 100000` —
+The `[parse]` check fired again on a live `en0` run and named `pid 100000` -
 the same value as before, on a real interface this time, not the loopback
 verification. The `-verbose` note included the record's raw bytes:
-`3d 02 00 00 65 6e 30 00 ...` — `3d`=length 61, `02`=af INET, `65 6e 30`="en0".
+`3d 02 00 00 65 6e 30 00 ...` - `3d`=length 61, `02`=af INET, `65 6e 30`="en0".
 Read as "the bytes near the pid field", that looks like a hard misalignment:
 an interface name where a pid should be.
 
@@ -1021,7 +1021,7 @@ candidate bugs were checked directly rather than re-argued from memory:
   brings it to exactly **48** before `pid` - matching `pflogOffUID=44` and
   `pflogOffPID=48` exactly, and the running total (61) matches the `length`
   byte every capture so far has shown, this one included.
-- **The record-header question** — whether the manual sample and the live
+- **The record-header question** - whether the manual sample and the live
   reader disagree about including the 16-byte pcap-per-packet header in
   `payload`. They don't: `readRaw` reads that header into a separate `rec`
   array *before* allocating `payload`, so `payload[0]` is never touched by
@@ -1106,7 +1106,7 @@ the reasoning survives the next person who wonders why.
    the inbound rule is scoped to one protocol and port pair the OS parses
    anyway. DHCPv6 is acknowledged in a comment rather than allowed for.
 3. **DNS is the widest part of the gap.** Accepted, with the real leak named
-   rather than the exotic one — see "The DNS hole is machine-wide". v0.1 ships
+   rather than the exotic one - see "The DNS hole is machine-wide". v0.1 ships
    the cheap mitigation: keep the gap short, log every query made through it,
    and report the count when the gap closes. The `user`-scoped rules that
    actually close it are v0.2.

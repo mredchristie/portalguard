@@ -1,0 +1,33 @@
+# Unit tests, vet and a build on macOS, since PortalGuard drives pf and only
+# targets macOS. The off-box e2e suite (testenv/e2e.sh) needs root, a real pf
+# and the four test containers, so it stays a local `make e2e` run.
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: vet
+        run: go vet ./...
+
+      - name: unit tests
+        run: go test -count=1 ./...
+
+      - name: build
+        run: make build

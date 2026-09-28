@@ -32,7 +32,27 @@ const (
 
 	// hookAnchorPoint is the line the block is inserted above.
 	hookAnchorPoint = `anchor "com.apple/*"`
+
+	// The second hook, added in v0.3: a translation anchor, so the DNS filter
+	// can redirect the gap's DNS to Portalguard's own resolver. pf applies
+	// rdr rules only from anchors the main ruleset reaches with rdr-anchor,
+	// and translation anchors must sit in pf.conf's translation section,
+	// which is why this is a separate block rather than a line in the first.
+	rdrBeginMarker = "# BEGIN portalguard-rdr"
+	rdrEndMarker   = "# END portalguard-rdr"
+	// rdrAnchorPoint is the line the rdr block is inserted below.
+	rdrAnchorPoint = `rdr-anchor "com.apple/*"`
+
+	filterHookLine = `anchor "portalguard"`
+	rdrHookLine    = `rdr-anchor "portalguard"`
 )
+
+// rdrHookBlock is the translation hook, inserted after Apple's own.
+func rdrHookBlock() string {
+	return rdrBeginMarker + " - redirect point for the DNS filter, empty unless portalguard is running.\n" +
+		rdrHookLine + "\n" +
+		rdrEndMarker
+}
 
 // hookBlock is inserted verbatim. Placement matters twice over: it must come
 // after the nat/rdr/dummynet anchors, because pf demands options then
@@ -67,13 +87,21 @@ func InstallAnchor(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("read %s: %w", PfConfPath, err)
 	}
-	if strings.Contains(string(original), beginMarker) {
-		return nil // already installed
+	// Each hook is added only if missing, so an install from before v0.3
+	// gains the rdr hook without its filter hook being touched.
+	updated := string(original)
+	if !hasLine(updated, filterHookLine) {
+		if updated, err = insertHook(updated); err != nil {
+			return err
+		}
 	}
-
-	updated, err := insertHook(string(original))
-	if err != nil {
-		return err
+	if !hasLine(updated, rdrHookLine) {
+		if updated, err = insertRdrHook(updated); err != nil {
+			return err
+		}
+	}
+	if updated == string(original) {
+		return nil // already installed
 	}
 
 	// Keep a pristine copy before the first edit, never overwriting an
@@ -148,7 +176,37 @@ func insertHook(conf string) (string, error) {
 		hookAnchorPoint, PfConfPath)
 }
 
-// removeHook strips the block back out, markers included.
+// insertRdrHook places the rdr block directly after Apple's rdr anchor, which
+// keeps it in the translation section where pf requires it.
+func insertRdrHook(conf string) (string, error) {
+	lines := strings.Split(conf, "\n")
+	for i, line := range lines {
+		if strings.TrimSpace(line) != rdrAnchorPoint {
+			continue
+		}
+		out := make([]string, 0, len(lines)+3)
+		out = append(out, lines[:i+1]...)
+		out = append(out, strings.Split(rdrHookBlock(), "\n")...)
+		out = append(out, lines[i+1:]...)
+		return strings.Join(out, "\n"), nil
+	}
+	return "", fmt.Errorf(
+		"could not find %s in %s, so there is no safe place for the rdr anchor; add %s by hand after the other rdr-anchor lines",
+		rdrAnchorPoint, PfConfPath, rdrHookLine)
+}
+
+// hasLine reports whether conf has exactly this line, ignoring indentation.
+func hasLine(conf, want string) bool {
+	for _, line := range strings.Split(conf, "\n") {
+		if strings.TrimSpace(line) == want {
+			return true
+		}
+	}
+	return false
+}
+
+// removeHook strips the block back out, markers included. Both blocks go:
+// the rdr markers start with the same "# BEGIN portalguard" prefix.
 func removeHook(conf string) string {
 	var out []string
 	skipping := false
@@ -174,9 +232,54 @@ func AnchorInstalled() (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("read %s: %w", PfConfPath, err)
 	}
-	return strings.Contains(string(conf), beginMarker), nil
+	return hasLine(string(conf), filterHookLine) && hasLine(string(conf), rdrHookLine), nil
+}
+
+// rdrHookLoaded reports whether the loaded main ruleset reaches our rdr
+// anchor. The DNS filter depends on it, and falls back to unfiltered DNS
+// without it rather than divert DNS to a redirect that never happens.
+//
+// The caller must hold b.mu.
+func (b *Backend) rdrHookLoaded(ctx context.Context) bool {
+	out, err := b.pfctl(ctx, "-s", "nat")
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "rdr-anchor ") && strings.Contains(line, `"`+AnchorName+`"`) {
+			return true
+		}
+	}
+	return false
 }
 
 func firewallNeedsRoot(cmd string) error {
 	return fmt.Errorf("pf: %s edits %s and needs root: try `sudo %s %s`", cmd, PfConfPath, os.Args[0], cmd)
+}
+
+// HooksLoaded reports whether pf's loaded main ruleset reaches both anchors.
+// It can be false while pf.conf on disk has them: anything that loads a
+// ruleset of its own (Internet Sharing, a VPN kill switch) replaces the
+// loaded one, and our hooks with it.
+func HooksLoaded(ctx context.Context) bool {
+	b := New()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	filter, err := b.hookInstalled(ctx)
+	return err == nil && filter && b.rdrHookLoaded(ctx)
+}
+
+// ReloadPfConf loads /etc/pf.conf again, validating it first. It puts our
+// hooks back after another tool replaced the loaded ruleset, and in doing so
+// removes whatever that tool had loaded.
+func ReloadPfConf(ctx context.Context) error {
+	b := New()
+	if _, err := b.pfctl(ctx, "-n", "-f", PfConfPath); err != nil {
+		return fmt.Errorf("%s did not parse, so it was not loaded: %w", PfConfPath, err)
+	}
+	if _, err := b.pfctl(ctx, "-f", PfConfPath); err != nil {
+		return fmt.Errorf("load %s: %w", PfConfPath, err)
+	}
+	return nil
 }

@@ -51,10 +51,37 @@ RUN_LOG2=""
 AUDIT_B=""
 AUDIT_D=""
 
-say()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
+# Per-phase accounting, for the summary at the end and the JSON it writes
+# ($SUMMARY). A phase is everything from one "PHASE ..." heading to the next.
+SUMMARY=${SUMMARY:-/tmp/portalguard-e2e.json}
+PHASES_TSV=$(mktemp -t portalguard-e2e-phases)
+phase_name=""
+phase_start=0
+phase_pass=0
+phase_fail=0
+
+end_phase() {
+    [ -n "$phase_name" ] || return 0
+    printf '%s\t%s\t%s\t%s\n' "$phase_name" "$phase_pass" "$phase_fail" \
+        "$(( $(date +%s) - phase_start ))" >>"$PHASES_TSV"
+    phase_name=""
+}
+
+say() {
+    printf '\n\033[1m== %s\033[0m\n' "$*"
+    end_phase
+    case "$1" in
+        PHASE*)
+            phase_name=$1
+            phase_start=$(date +%s)
+            phase_pass=0
+            phase_fail=0
+            ;;
+    esac
+}
 cmd()  { printf '   $ %s\n' "$*"; "$@"; }
-pass() { printf '   \033[32mPASS\033[0m %s\n' "$*"; }
-bad()  { printf '   \033[31mFAIL\033[0m %s\n' "$*"; fail_count=$((fail_count + 1)); }
+pass() { printf '   \033[32mPASS\033[0m %s\n' "$*"; phase_pass=$((phase_pass + 1)); }
+bad()  { printf '   \033[31mFAIL\033[0m %s\n' "$*"; fail_count=$((fail_count + 1)); phase_fail=$((phase_fail + 1)); }
 
 # refuse_unredacted is not "bad": a failed assertion still lets the script
 # run to completion and report a failing exit code, but this specific
@@ -84,11 +111,16 @@ cleanup() {
     [ -n "${AUDIT_B:-}" ] && rm -f "$AUDIT_B"
     [ -n "${AUDIT_D:-}" ] && rm -f "$AUDIT_D"
     cmd pfctl -a portalguard -F rules  >/dev/null 2>&1
+    cmd pfctl -a portalguard -F nat    >/dev/null 2>&1
     cmd pfctl -a portalguard -F Tables >/dev/null 2>&1
+    [ -n "${PHASES_TSV:-}" ] && rm -f "$PHASES_TSV"
     ifconfig pflog1 >/dev/null 2>&1 && cmd ifconfig pflog1 destroy >/dev/null 2>&1
     printf '   anchor flushed. network should be back.\n'
 }
-trap cleanup EXIT INT TERM
+# An interrupt must exit: a trap that only cleans up lets the script carry on
+# from wherever it was, against a machine it has just put back.
+trap cleanup EXIT
+trap 'exit 130' INT TERM
 
 # --- assertions --------------------------------------------------------------
 # reachable/blocked deliberately use IP literals: DNS is blocked during
@@ -151,6 +183,11 @@ if [ -n "$stale" ]; then
 fi
 printf '   binary is current\n'
 
+# A VPN owning the default route makes its tunnel the "gateway", and every
+# phase would be testing the wrong thing - a live run did exactly that.
+case "$(route -n get default 2>/dev/null | awk '/interface:/ {print $2}')" in
+    utun*|ipsec*|ppp*) echo "a VPN owns the default route. disconnect it, then: sudo $BIN install-anchor"; exit 64 ;;
+esac
 if [ -z "$GATEWAY" ]; then
     GATEWAY=$(route -n get default 2>/dev/null | awk '/gateway/{print $2}')
 fi
@@ -166,9 +203,16 @@ fi
 
 grep -q 'portalguard' /etc/pf.conf 2>/dev/null \
     || { echo "anchor hook missing. run: sudo $BIN install-anchor"; exit 64; }
+pfctl -s nat 2>/dev/null | grep -q 'rdr-anchor "portalguard"' \
+    || { echo "rdr hook missing (PHASE F needs it). run: sudo $BIN install-anchor"; exit 64; }
+# A ruleset that skips loopback - a VPN kill switch's; NordVPN leaves one
+# behind - means no redirect is ever applied on it.
+/sbin/pfctl -s Interfaces -v 2>/dev/null | grep -q '^lo0 (skip)' \
+    && { echo "pf is skipping loopback (a VPN kill switch's ruleset; NordVPN leaves one behind),"; \
+         echo "so DNS cannot be redirected. disconnect the VPN, then: sudo ./bin/portalguard install-anchor"; exit 64; }
 
 curl -s -o /dev/null -m 5 "$PORTAL/status" \
-    || { echo "fake portal not answering at $PORTAL. run: make testenv-up"; exit 64; }
+    || { echo "fake portal not answering at $PORTAL. in another terminal run: make e2e-portal"; exit 64; }
 
 curl -s -o /dev/null -m 5 "http://$GATEWAY/" \
     || { echo "gateway $GATEWAY does not answer HTTP; set GATEWAY= to something that does"; exit 64; }
@@ -201,10 +245,10 @@ if [ "$REDACT" = "1" ]; then
     AUDIT_B=$(mktemp -t portalguard-e2e-audit-b)
     printf '   $ %s run -probes-file %s -wait %ss -redact -audit-log <not printed> &   (output -> %s)\n' \
         "$BIN" "$PROBES" "$WAIT" "$RUN_LOG"
-    "$BIN" run -no-handoff -probes-file "$PROBES" -wait "${WAIT}s" -poll 2s -redact -audit-log "$AUDIT_B" >"$RUN_LOG" 2>&1 &
+    "$BIN" run -no-handoff -no-dns-filter -probes-file "$PROBES" -wait "${WAIT}s" -poll 2s -redact -audit-log "$AUDIT_B" >"$RUN_LOG" 2>&1 &
 else
     printf '   $ %s run -probes-file %s -wait %ss &   (output -> %s)\n' "$BIN" "$PROBES" "$WAIT" "$RUN_LOG"
-    "$BIN" run -no-handoff -probes-file "$PROBES" -wait "${WAIT}s" -poll 2s >"$RUN_LOG" 2>&1 &
+    "$BIN" run -no-handoff -no-dns-filter -probes-file "$PROBES" -wait "${WAIT}s" -poll 2s >"$RUN_LOG" 2>&1 &
 fi
 run_pid=$!
 
@@ -390,7 +434,7 @@ RUN_LOG2=$(mktemp -t portalguard-e2e-redact)
 AUDIT_D=$(mktemp -t portalguard-e2e-audit-d)
 printf '   $ %s run -probes-file %s -wait %ss -redact -audit-log <not printed> &   (output -> %s)\n' \
     "$BIN" "$PROBES" "$WAIT" "$RUN_LOG2"
-"$BIN" run -no-handoff -probes-file "$PROBES" -wait "${WAIT}s" -poll 2s -redact -audit-log "$AUDIT_D" >"$RUN_LOG2" 2>&1 &
+"$BIN" run -no-handoff -no-dns-filter -probes-file "$PROBES" -wait "${WAIT}s" -poll 2s -redact -audit-log "$AUDIT_D" >"$RUN_LOG2" 2>&1 &
 run_pid=$!
 
 printf '   waiting for GAP_OPEN'
@@ -466,7 +510,118 @@ cmd "$BIN" release >/dev/null || bad "release failed"
 reachable "http://$GATEWAY/"        "gateway reachable after the redaction cycle's release"
 
 # ==============================================================================
+say "PHASE E -- the VPN handover lets VPN traffic out and nothing else"
+# No VPN is involved: a live VPN cannot prove this (NordVPN's kill switch
+# replaces pf's rules, WireGuard takes the route before its handshake). So one
+# UDP packet goes to 51820 (WireGuard, in the hole) and one to port 9 (not),
+# and tcpdump on the outgoing interface shows which left: pf drops a blocked
+# packet before the interface sees it. 203.0.113.1 is TEST-NET-3, routed to
+# no one.
+HO_DST=203.0.113.1
+HO_IF=$(route -n get default 2>/dev/null | awk '/interface:/ {print $2}')
+HO_CAP=$(mktemp -t portalguard-e2e-handover)
+ho_send() { printf 'portalguard-e2e' | nc -u -w1 "$HO_DST" "$1" >/dev/null 2>&1; }
+ho_seen() { grep -c "$HO_DST\.$1:" "$HO_CAP"; }
+
+cmd "$BIN" lockdown >/dev/null || bad "lockdown failed"
+tcpdump -i "$HO_IF" -n -l "udp and host $HO_DST" >"$HO_CAP" 2>/dev/null &
+ho_dump=$!
+printf '   $ %s handoff -wait 8s &   (no VPN will connect, so it times out)\n' "$BIN"
+"$BIN" handoff -wait 8s >/dev/null 2>&1 &
+ho_pid=$!
+sleep 2
+ho_send 51820
+ho_send 9
+sleep 1
+if [ "$(ho_seen 51820)" -ge 1 ]; then pass "udp 51820 left during the handover (the VPN hole)"; else bad "udp 51820 did not leave during the handover"; fi
+if [ "$(ho_seen 9)" -eq 0 ]; then pass "udp 9 was dropped during the handover (not VPN traffic)"; else bad "udp 9 left during the handover -- the hole is too wide"; fi
+blocked "http://$GATEWAY/" "everything else still blocked during the handover"
+wait "$ho_pid" 2>/dev/null
+before=$(ho_seen 51820)
+ho_send 51820
+sleep 1
+if [ "$(ho_seen 51820)" -eq "$before" ]; then pass "the VPN hole closed again when the handover timed out"; else bad "udp 51820 still leaves after the handover timed out"; fi
+blocked "http://$GATEWAY/" "the lockdown stays after a handover with no VPN"
+kill "$ho_dump" 2>/dev/null
+rm -f "$HO_CAP"
+cmd "$BIN" release >/dev/null || bad "release failed"
+
+# ==============================================================================
+say "PHASE F -- the DNS filter keeps every other app's DNS on the machine"
+# The same cycle as PHASE B, with the v0.3 DNS filter on (run's default).
+# Here the portal and the probes are addresses, so the login needs no DNS at
+# all: every lookup during the gap should be refused on the machine, and pf
+# should count nothing leaving through the DNS hole. PHASE B, with the filter
+# off, is the contrast.
+curl -s -o /dev/null "$PORTAL/reset"
+RUN_LOG3=$(mktemp -t portalguard-e2e-dns)
+printf '   $ %s run -probes-file %s -wait %ss -redact &   (the DNS filter is on by default)\n' "$BIN" "$PROBES" "$WAIT"
+"$BIN" run -no-handoff -probes-file "$PROBES" -wait "${WAIT}s" -poll 2s -redact >"$RUN_LOG3" 2>&1 &
+run_pid=$!
+i=0
+while [ $i -lt 30 ]; do
+    pfctl -a portalguard -t pg_portal -T show 2>/dev/null | grep -q "$GATEWAY" && break
+    sleep 1
+    i=$((i + 1))
+done
+if pfctl -s nat -a portalguard 2>/dev/null | grep -q "rdr"; then
+    pass "the gap's DNS is redirected to the filter (rdr loaded)"
+else
+    bad "no rdr rule in the anchor -- the filter is not in the path"
+fi
+# Background apps get a few seconds to try their lookups.
+sleep 6
+cmd curl -s -o /dev/null -X POST "$PORTAL/accept"
+printf '   waiting for the re-probe to succeed and seal'
+i=0
+while [ $i -lt 45 ]; do
+    kill -0 "$run_pid" 2>/dev/null || break
+    printf '.'
+    sleep 1
+    i=$((i + 1))
+done
+printf '\n'
+kill -0 "$run_pid" 2>/dev/null && bad "run had not sealed 45s after the login"
+wait "$run_pid" 2>/dev/null
+run_pid=""
+refused=$(sed -n 's/^The DNS filter refused \([0-9][0-9]*\) lookup.*/\1/p' "$RUN_LOG3" | head -1)
+if [ -n "$refused" ] && [ "$refused" -gt 0 ] 2>/dev/null; then
+    pass "the filter refused $refused lookup(s) on the machine"
+else
+    bad "the report shows no refusals -- the filter did not run, or saw nothing"
+fi
+if grep -q "No DNS went through the gap" "$RUN_LOG3"; then
+    pass "pf counted no DNS leaving during the gap"
+else
+    bad "DNS left through the gap with the filter on: $(grep 'went out through the DNS hole' "$RUN_LOG3")"
+fi
+rm -f "$RUN_LOG3"
+cmd "$BIN" release >/dev/null || bad "release failed"
+reachable "http://$GATEWAY/" "gateway reachable after the DNS filter cycle"
+
+# ==============================================================================
 say "RESULT"
+printf '   %-60s %6s %6s\n' "phase" "checks" "secs"
+while IFS="$(printf '\t')" read -r name ok nok secs; do
+    printf '   %-60s %3s/%-3s %4ss\n' "$name" "$ok" "$((ok + nok))" "$secs"
+done <"$PHASES_TSV"
+
+# The same, as JSON: what the portfolio's replay of this run is built from.
+{
+    printf '{\n  "version": "%s",\n  "date": "%s",\n  "failed": %s,\n  "phases": [\n' \
+        "$("$BIN" version 2>/dev/null | awk '{print $NF}')" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$fail_count"
+    first=1
+    while IFS="$(printf '\t')" read -r name ok nok secs; do
+        [ $first -eq 1 ] || printf ',\n'
+        first=0
+        printf '    {"name": "%s", "passed": %s, "failed": %s, "secs": %s}' "$name" "$ok" "$nok" "$secs"
+    done <"$PHASES_TSV"
+    printf '\n  ]\n}\n'
+} >"$SUMMARY"
+chmod 644 "$SUMMARY"
+rm -f "$PHASES_TSV"
+printf '   summary written to %s\n' "$SUMMARY"
+
 if [ "$fail_count" -eq 0 ]; then
     printf '   \033[32mall assertions passed\033[0m\n'
     exit 0

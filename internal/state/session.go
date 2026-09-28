@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"portalguard/internal/dnsfilter"
 	"portalguard/internal/firewall"
 	"portalguard/internal/portal"
 )
@@ -51,6 +52,10 @@ type Session struct {
 	// so a three-second poll does not repeat itself. See OnSuggestion.
 	onSuggest func([]string)
 	suggested map[string]bool
+
+	// dns is the filtering resolver, while this session is running one. See
+	// dnsfilter.go.
+	dns *dnsfilter.Server
 }
 
 // NewSession wires a session. A nil prober gets the default probe list.
@@ -396,10 +401,17 @@ func (s *Session) AllowExtra(ctx context.Context, host string, ports ...int) err
 	if !s.machine.Can(EventExtendGap) {
 		return &InvalidTransitionError{From: s.machine.State(), Event: EventExtendGap}
 	}
-	h, err := resolveHost(ctx, host, ports, "manually added by the user")
+	// The name goes to the DNS filter first, or resolving it here is the
+	// very lookup the filter refuses.
+	s.allowDNSName(host)
+	h, err := resolveViaFilter(ctx, host, ports, "manually added by the user")
 	if err != nil {
 		return err
 	}
+	// The browser's earlier lookup of this name was refused, and macOS
+	// caches that. Without a flush, reloading the page keeps failing on the
+	// cached refusal long after the name has been allowed.
+	flushSystemDNSCache()
 	if err := s.fw.AllowHost(ctx, h); err != nil {
 		return fmt.Errorf("allow %s: %w", host, err)
 	}
@@ -712,6 +724,9 @@ func (s *Session) Seal(ctx context.Context) error {
 	if err := s.fw.Seal(ctx); err != nil {
 		return fmt.Errorf("seal: %w", err)
 	}
+	// The gap's DNS rules went with the seal; the resolver behind them goes
+	// now. Its record stays, for the report.
+	s.stopDNSFilter()
 	s.mu.Lock()
 	s.allowed = nil
 	s.mu.Unlock()
@@ -739,6 +754,7 @@ func (s *Session) Report() (firewall.Report, bool) {
 // state and is what the crash handler and `portalguard release` call.
 func (s *Session) Release(ctx context.Context) error {
 	err := s.fw.Release(ctx)
+	s.stopDNSFilter()
 	s.mu.Lock()
 	s.allowed = nil
 	s.mu.Unlock()

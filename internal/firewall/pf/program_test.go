@@ -22,6 +22,12 @@ type fakePfctl struct {
 	calls       []string
 	loaded      string // the anchor ruleset currently "in the kernel"
 	hookPresent bool
+	// rdrHookPresent is whether the main ruleset reaches our rdr-anchor,
+	// which the DNS filter needs.
+	rdrHookPresent bool
+	// skipLoopback is `set skip on lo0` in the main ruleset, as Internet
+	// Sharing loads it.
+	skipLoopback bool
 	// blockedOut and dns are the packet counts `-s rules -v` reports for the
 	// *currently loaded* ruleset. A load resets them to zero, exactly as pf
 	// does, and traffic() is how a test says packets arrived since then.
@@ -89,6 +95,18 @@ func (f *fakePfctl) run(_ context.Context, path string, stdin []byte, args ...st
 			return "anchor \"portalguard\" all\nanchor \"com.apple/*\" all\n", nil
 		}
 		return "anchor \"com.apple/*\" all\n", nil
+
+	case joined == "-s Interfaces -v":
+		if f.skipLoopback {
+			return "en0\nlo0 (skip)\nawdl0 (skip)\n", nil
+		}
+		return "en0\nlo0\nawdl0 (skip)\n", nil
+
+	case joined == "-s nat":
+		if f.rdrHookPresent {
+			return "rdr-anchor \"portalguard\" all\nrdr-anchor \"com.apple/*\" all\n", nil
+		}
+		return "rdr-anchor \"com.apple/*\" all\n", nil
 
 	case strings.Contains(joined, "-f -"):
 		f.loaded = string(stdin)

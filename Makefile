@@ -4,7 +4,7 @@ BIN_DIR  := bin
 VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS  := -X main.version=$(VERSION)
 
-.PHONY: all build install uninstall test vet fmt clean detect rescue e2e e2e-redact demo demo-allow testenv-up testenv-down testenv-logs hotspot-up hotspot-down hotspot-demo hotspot-known handoff-check
+.PHONY: all build install uninstall test vet fmt clean detect rescue e2e e2e-redact demo demo-allow testenv-up testenv-down testenv-logs hotspot-up hotspot-down hotspot-demo hotspot-known handoff-check dns-spike e2e-portal
 
 all: vet test build
 
@@ -78,6 +78,14 @@ testenv-logs:
 # a "redacted" recording that was not. Expanding REDACT into an argument
 # here, before the `sudo` line runs, means make e2e REDACT=1 actually works
 # rather than repeating that mistake with a friendlier-looking spelling.
+# The fake portal e2e.sh talks to, without a container runtime: plain Go on
+# 127.0.0.1:8080, redirecting to this network's gateway so the gap is pinned
+# to a genuinely off-box address. Leave it running in a second terminal.
+e2e-portal:
+	@route -n get default | grep -qE 'interface: (utun|ipsec|ppp)' \
+		&& { echo "a VPN owns the default route; disconnect it first"; exit 1; } || true
+	go run ./testenv/portal-web -addr 127.0.0.1:8080 -login-url http://$$(route -n get default | awk '/gateway/{print $$2}')/
+
 e2e: build
 	@echo "this needs root and CUTS THE NETWORK several times on purpose."
 	sudo ./testenv/e2e.sh $(if $(filter 1,$(REDACT)),--redact)
@@ -133,3 +141,11 @@ hotspot-known: build
 handoff-check: build
 	@echo "this needs root and CUTS THE NETWORK for about ten seconds."
 	sudo ./testenv/handoff-rules-check.sh
+
+# --- The v0.3 DNS filter ---------------------------------------------------------
+# Proves pf can divert this Mac's DNS to a local resolver, the mechanism the
+# DNS filter is built on. Needs the rdr hook: sudo ./bin/portalguard
+# install-anchor. Disconnect any VPN first.
+dns-spike: build
+	go build -o $(BIN_DIR)/dnsspike ./testenv/dnsspike
+	sudo ./testenv/dns-redirect-spike.sh

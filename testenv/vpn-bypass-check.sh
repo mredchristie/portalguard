@@ -35,7 +35,8 @@ snapshot() {
     /sbin/pfctl -s Anchors 2>/dev/null | sed 's/^/  /'
 }
 
-trap '"$BIN" release >/dev/null 2>&1' EXIT INT TERM
+trap '"$BIN" release >/dev/null 2>&1' EXIT
+trap 'exit 130' INT TERM
 
 "$BIN" lockdown || exit 1
 snapshot "locked down, VPN disconnected"

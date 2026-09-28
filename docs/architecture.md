@@ -209,8 +209,11 @@ Verified on real hardware, and re-verified by `testenv/e2e.sh`:
 | The re-probe sees the login finish once the probe names resolve outside the gap | `make hotspot-demo`, through `<pg_check>` |
 | A remembered host opens only after a live TLS check | `make hotspot-known`, against certificates the system trusts |
 | Hostnames opened by `allow` survive into a later `remember` | `make hotspot-demo`, three separate processes |
-| The handover lets VPN traffic out, nothing else, and closes on timeout | `make handoff-check`: a UDP packet to 51820 leaves, one to 9 does not, and 51820 is dropped again once the hole closes, seen on the wire |
+| The handover lets VPN traffic out, nothing else, and closes on timeout | e2e PHASE E (and `make handoff-check`): a UDP packet to 51820 leaves, one to 9 does not, and 51820 is dropped again once the hole closes, seen on the wire |
 | A VPN kill switch taking over the firewall is noticed, not missed | Live with NordVPN: its ruleset replaced ours on connect, and the handover reported it and cleaned up |
+| pf can redirect this Mac's DNS to a local resolver | `make dns-spike`: queries straight at the router (UDP and TCP) and through mDNSResponder all diverted |
+| With the DNS filter, nothing but the login's names reaches the network's resolver | `make hotspot-demo`: the hotspot's resolver heard only the login's names; 65 other lookups refused on the machine. The control (`DNS_FILTER=off`) leaked 20 names |
+| The DNS filter holds on a real LAN, not only the hotspot | e2e PHASE F: 68 lookups refused, and pf counted no DNS leaving during the gap. PHASE B, filter off, leaked names in the same setup, NordVPN's own telemetry among them |
 | A stale session file cannot claim a gap the ruleset denies | Unit tests over every phase/snapshot pairing |
 | Detection survives a real portal | BT Wi-Fi, live: portal found, host pinned, non-standard port carried through, clean release |
 
@@ -258,10 +261,10 @@ presenting the demo should not claim it shows the gap working.
   aside first. An OpenVPN or IKEv2 client, which handshakes before taking the
   route, is the case still to run. Some clients also call their provider's API
   before connecting, which the hole does not allow.
-- The DNS hole in `GAP_OPEN` is machine-wide. Background daemons do leak
-  hostnames through it; Portalguard counts them and says so. Scoping the rule
-  to the browser's user id, once the plan, cannot work on macOS, because every
-  lookup is sent by `mDNSResponder`. The fix is a filtering resolver, v0.3.
+- The DNS filter against a real portal. It is proven against the off-box
+  hotspot; a real network adds resolvers that behave differently, and portals
+  whose pages load third-party names that will be refused until allowed. It
+  also runs only inside `run`, and does not cover IPv6 resolvers.
 - DHCP lease expiry mid-lockdown, IPv6-only networks, and roaming between
   networks while engaged.
 - Linux and Windows. The packages exist with their designs recorded in the

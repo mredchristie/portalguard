@@ -22,8 +22,19 @@ func runInstallAnchor(ctx context.Context, args []string) int {
 		return fail(err)
 	}
 	installed, _ := pf.AnchorInstalled()
+	if installed && pf.HooksLoaded(ctx) {
+		fmt.Printf("already installed: %s references the portalguard anchors, and pf has them loaded\n", pf.PfConfPath)
+		return exitOK
+	}
 	if installed {
-		fmt.Printf("already installed: %s references the portalguard anchor\n", pf.PfConfPath)
+		// On disk but not loaded: something replaced pf's ruleset with one
+		// of its own. Putting ours back replaces theirs in turn.
+		if err := pf.ReloadPfConf(ctx); err != nil {
+			return fail(err)
+		}
+		fmt.Printf("the anchors were in %s but not in pf's loaded rules, so it has been reloaded.\n", pf.PfConfPath)
+		fmt.Println("something had replaced pf's rules, usually a VPN kill switch (NordVPN does, and")
+		fmt.Println("leaves them behind after it disconnects).")
 		return exitOK
 	}
 	if err := pf.InstallAnchor(ctx); err != nil {

@@ -34,8 +34,20 @@ import (
 // distinguishable from "nothing worth suggesting" and does not need to be:
 // both mean there is nothing to print.
 func (s *Session) SuggestAllow() []string {
-	w, ok := s.fw.(firewall.NameWatcher)
-	if !ok {
+	// Two sources of "looked up": the names the DNS filter refused, when it
+	// is running, and the names pf's log saw go through the DNS hole. With
+	// the filter on, the log only ever sees names the filter let out, so the
+	// refusals are where a blank page's missing hosts show up.
+	var seen []string
+	if w, ok := s.fw.(firewall.NameWatcher); ok {
+		seen = w.NamesSeen()
+	}
+	s.mu.Lock()
+	if s.dns != nil {
+		seen = append(seen, s.dns.Refused()...)
+	}
+	s.mu.Unlock()
+	if len(seen) == 0 {
 		return nil
 	}
 
@@ -63,7 +75,7 @@ func (s *Session) SuggestAllow() []string {
 		}
 	}
 
-	return relatedNames(w.NamesSeen(), portalHost, open)
+	return relatedNames(seen, portalHost, open)
 }
 
 // relatedNames picks the names worth showing out of every lookup the machine

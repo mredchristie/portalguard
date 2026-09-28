@@ -153,6 +153,13 @@ func classify(rule string) role {
 		}
 		return roleOther
 	case strings.HasPrefix(rule, "pass"):
+		// Checked first: the DNS filter's route-to rule names the resolvers
+		// too, but what it matches is sent back to loopback, to the filter,
+		// and never leaves. Counting it as DNS out would report every query
+		// the filter refused as a leak - the first live filtered run did.
+		if strings.Contains(rule, "route-to") {
+			return roleOther
+		}
 		if strings.Contains(rule, "<"+dnsTable+">") {
 			return roleDNS
 		}

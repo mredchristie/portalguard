@@ -198,6 +198,11 @@ func (b *Backend) syncFromKernel(ctx context.Context) {
 	if gapRulesLoaded(out) {
 		b.phase = firewall.PhaseGap
 		b.allowed = b.allowedFromKernel(ctx, out)
+		// Only ever turned on here, never off: the process that turns the
+		// filter on does so while locked down, before any gap rules exist.
+		if strings.Contains(out, "route-to") {
+			b.dnsFilter = true
+		}
 	}
 }
 

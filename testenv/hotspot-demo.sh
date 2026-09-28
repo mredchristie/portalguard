@@ -30,6 +30,11 @@ cd "$(dirname "$0")/.."
 ACT=${1:-first}
 MODE=${2:-auto}
 WAIT=60s
+# DNS_FILTER=off runs without the v0.3 DNS filter: the control run, in which
+# the DNS check below should fail, because every app's lookups reach the
+# network during the gap.
+RUN_FLAGS=""
+[ "${DNS_FILTER:-on}" = off ] && RUN_FLAGS="-no-dns-filter"
 [ "$MODE" = human ] && WAIT=180s
 BIN=${BIN:-./bin/portalguard}
 DOMAIN=${DOMAIN:-guestwifi.test}
@@ -50,7 +55,10 @@ cleanup() {
     "$BIN" release >/dev/null 2>&1 || true
     ./testenv/hotspot.sh dns-off >/dev/null 2>&1 || true
 }
-trap cleanup EXIT INT TERM
+# An interrupt must exit: a trap that only cleans up lets the script carry on
+# from wherever it was, against a machine it has just put back.
+trap cleanup EXIT
+trap 'exit 130' INT TERM
 
 curl -s -m 3 -X POST -o /dev/null "http://$WWW:8443/reset"
 
@@ -119,6 +127,9 @@ login() {
 
 first_visit() {
     wait_for_gap || return 0
+    # From here on, every name the network's resolver hears was asked during
+    # the gap. See the DNS check at the end.
+    curl -s -m 2 -o /dev/null -X POST "http://$WWW:8443/dnsmark"
     sleep 3
     banner "browser: loading the login page"
     page=$(fetch "http://www.$DOMAIN:8443/login")
@@ -158,6 +169,9 @@ first_visit() {
 
 known_visit() {
     wait_for_gap || return 0
+    # From here on, every name the network's resolver hears was asked during
+    # the gap. See the DNS check at the end.
+    curl -s -m 2 -o /dev/null -X POST "http://$WWW:8443/dnsmark"
     sleep 3
     banner "browser: loading the login page"
     js=$(fetch "http://cdn.$DOMAIN/site.js")
@@ -182,11 +196,26 @@ esac
 BROWSER=$!
 
 status=0
-"$BIN" run -no-handoff -wait "$WAIT" -poll 2s -redact || status=$?
+# shellcheck disable=SC2086
+"$BIN" run -no-handoff $RUN_FLAGS -wait "$WAIT" -poll 2s -redact || status=$?
 # If run gave up early the browser has nothing left to test against.
 kill "$BROWSER" 2>/dev/null || true
 wait "$BROWSER" 2>/dev/null || true
 check "run noticed the login and sealed" "$status" 0
+
+# What the network's resolver heard during the gap. The hotspot is the
+# network, so a name it never heard never left this machine. Released first:
+# the sealed lockdown would drop the request for the log itself.
+"$BIN" release >/dev/null 2>&1
+leaked=$(curl -s -m 3 "http://$WWW:8443/dnslog" | python3 -c '
+import json, sys
+login = {"www.guestwifi.test", "cdn.guestwifi.test", "reg.guestwifi.test",
+         "captive.apple.com", "connectivitycheck.gstatic.com"}
+names = json.load(sys.stdin)
+print(" ".join(sorted(n for n in names if n not in login)) or "none")
+' 2>/dev/null || echo "unreadable")
+echo "DNS that reached the network during the gap, beyond the login's own names: $leaked"
+check "no other app's DNS left the machine during the gap" "$leaked" none
 
 banner "verdict"
 cat "$RESULTS"

@@ -38,6 +38,7 @@ func (b *Backend) Lockdown(ctx context.Context) error {
 
 	b.phase = firewall.PhaseLocked
 	b.allowed = nil
+	b.dnsFilter = false
 	b.since = time.Now()
 	// A fresh engagement gets a fresh account, on disk as well as in memory.
 	b.counters = tally{}
@@ -78,12 +79,18 @@ func (b *Backend) AllowHost(ctx context.Context, h firewall.Host) error {
 	// losing the leak log is bad, but failing to open the gap over it would
 	// leave the user unable to log in at all.
 	g := gapFromHosts(next(b.allowed, h))
+	opening := b.phase != firewall.PhaseGap
 	if created, err := b.ensureLogInterface(ctx); err != nil {
 		b.appendNote(fmt.Sprintf("leak logging unavailable: %v", err))
 	} else {
 		b.logCreated = b.logCreated || created
 		g.logTo = LogInterface
-		if b.reader == nil {
+		// Only the process that opens the gap reads the log. A second
+		// process widening it (`allow` from another terminal) would start a
+		// tcpdump that outlives it: nothing stops an exec'd child when its
+		// parent exits, and the orphan holds pflog1 open, so the seal can
+		// no longer destroy it. Found by e2e PHASE C.
+		if b.reader == nil && opening {
 			reader := newLogReader()
 			if err := reader.Start(ctx); err != nil {
 				b.appendNote(fmt.Sprintf("leak logging unavailable: %v", err))
@@ -144,6 +151,7 @@ func (b *Backend) Seal(ctx context.Context) error {
 	}
 	b.phase = firewall.PhaseLocked
 	b.allowed = nil
+	b.dnsFilter = false
 	if b.gapClosed.IsZero() {
 		b.gapClosed = time.Now()
 	}
@@ -258,6 +266,11 @@ func (b *Backend) loadLocked(ctx context.Context, g gap) error {
 	// rather than at each call site where it could be forgotten.
 	b.sampleCountersLocked(ctx)
 
+	// The DNS filter rides along with any open gap once it is on, however
+	// the reload was reached, so no caller can forget it.
+	if g.isOpen() && b.dnsFilter {
+		g.dnsFilter = true
+	}
 	rules := render(g)
 	if _, err := b.pfctlStdin(ctx, []byte(rules), "-a", AnchorName, "-f", "-"); err != nil {
 		return fmt.Errorf("load anchor ruleset: %w", err)
@@ -334,4 +347,17 @@ func PreviewRules(hosts []firewall.Host) string {
 		return render(gap{})
 	}
 	return render(gapFromHosts(hosts))
+}
+
+// Detach stops anything this process started that must not outlive it -
+// today, the leak log reader - without touching the rules. For short-lived
+// commands (`allow`) that open a gap and exit: the gap stays, and the reader
+// goes, because an exec'd tcpdump is not stopped when its parent exits.
+func (b *Backend) Detach() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.reader != nil {
+		b.reader.Stop()
+		b.reader = nil
+	}
 }

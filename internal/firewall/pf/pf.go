@@ -45,7 +45,7 @@ const pfctlPath = "/sbin/pfctl"
 //
 // The usual cause is not a botched install but a macOS update: updates restore
 // the stock /etc/pf.conf and the hook goes with it. Seen after 26.7.1.
-var ErrNoAnchorHook = errors.New(`pf: /etc/pf.conf has no anchor "portalguard" line, so portalguard's rules would load but never be evaluated (macOS updates restore /etc/pf.conf, which removes it); run: sudo portalguard install-anchor`)
+var ErrNoAnchorHook = errors.New(`pf: the loaded ruleset has no anchor "portalguard" line, so portalguard's rules would load but never be evaluated; run: sudo portalguard install-anchor (the usual causes: a macOS update restored /etc/pf.conf, or Internet Sharing or a VPN loaded a ruleset of its own)`)
 
 // tokenRe extracts the reference token from `pfctl -E` output.
 var tokenRe = regexp.MustCompile(`(?i)token\s*:\s*(\d+)`)
@@ -109,6 +109,12 @@ type Backend struct {
 	// a read failure - see Report.ProcessesDeclinedByKernel.
 	leakProcessesDeclinedByKernel bool
 
+	// dnsFilter is set while the gap's DNS goes through Portalguard's own
+	// resolver. Recovered from the kernel by a second process (the loaded
+	// rules carry a route-to only when it is on), so an `allow` from another
+	// terminal keeps it.
+	dnsFilter bool
+
 	// exec, when set, replaces the real pfctl and ifconfig invocations.
 	//
 	// It exists so the rule-programming sequence can be tested without root
@@ -166,7 +172,9 @@ func (b *Backend) Release(ctx context.Context) error {
 	//
 	// The hand-typed rescue command (`make rescue`) does use -F all, because a
 	// human typing it wants maximum effect and one flag to remember.
-	for _, what := range []string{"rules", "Tables"} {
+	// nat too: it holds the DNS filter's rdr rule, and flushing "rules"
+	// covers only filter rules.
+	for _, what := range []string{"rules", "nat", "Tables"} {
 		if _, err := b.pfctl(ctx, "-a", AnchorName, "-F", what); err != nil {
 			// A missing anchor is not a failure: there was nothing to undo.
 			if !isMissingAnchor(err) {
@@ -204,6 +212,7 @@ func (b *Backend) Release(ctx context.Context) error {
 	b.phase = firewall.PhaseOff
 	b.allowed = nil
 	b.since = time.Time{}
+	b.dnsFilter = false
 	return errors.Join(errs...)
 }
 

@@ -4,6 +4,7 @@ package pf
 
 import (
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -125,5 +126,92 @@ func TestRealPfConfIsStillTheShapeWeExpect(t *testing.T) {
 	}
 	if _, err := insertHook(string(conf)); err != nil {
 		t.Errorf("this machine's %s no longer has a place to insert the anchor: %v", PfConfPath, err)
+	}
+}
+
+// installBoth applies both hooks the way InstallAnchor does.
+func installBoth(t *testing.T, conf string) string {
+	t.Helper()
+	var err error
+	if !hasLine(conf, filterHookLine) {
+		if conf, err = insertHook(conf); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !hasLine(conf, rdrHookLine) {
+		if conf, err = insertRdrHook(conf); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return conf
+}
+
+// TestRdrHookSitsInTheTranslationSection: pf rejects a translation anchor
+// after the filter anchors, so ours goes straight after Apple's rdr-anchor.
+func TestRdrHookSitsInTheTranslationSection(t *testing.T) {
+	got := installBoth(t, stockPfConf)
+	lines := strings.Split(got, "\n")
+	pos := func(want string) int {
+		for i, l := range lines {
+			if strings.TrimSpace(l) == want {
+				return i
+			}
+		}
+		t.Fatalf("%q missing from:\n%s", want, got)
+		return -1
+	}
+	appleRdr, ours, dummynet, filter := pos(`rdr-anchor "com.apple/*"`), pos(rdrHookLine), pos(`dummynet-anchor "com.apple/*"`), pos(filterHookLine)
+	if !(appleRdr < ours && ours < dummynet && ours < filter) {
+		t.Errorf("rdr hook at line %d; want after Apple's rdr-anchor (%d), before dummynet (%d) and the filter hook (%d):\n%s",
+			ours, appleRdr, dummynet, filter, got)
+	}
+}
+
+// TestInstallUpgradesAV02Conf: a machine installed before v0.3 has only the
+// filter hook, and must gain the rdr hook without the filter hook doubling.
+func TestInstallUpgradesAV02Conf(t *testing.T) {
+	v02, err := insertHook(stockPfConf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := installBoth(t, v02)
+	n := 0
+	for _, l := range strings.Split(got, "\n") {
+		if strings.TrimSpace(l) == filterHookLine {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("filter hook appears %d times after the upgrade:\n%s", n, got)
+	}
+	if !hasLine(got, rdrHookLine) {
+		t.Errorf("the upgrade did not add the rdr hook:\n%s", got)
+	}
+}
+
+// TestRemoveHookTakesBothBlocks: uninstall leaves the stock file exactly.
+func TestRemoveHookTakesBothBlocks(t *testing.T) {
+	if got := removeHook(installBoth(t, stockPfConf)); got != stockPfConf {
+		t.Errorf("uninstall left:\n%s", got)
+	}
+}
+
+// TestInstalledPfConfParses puts the full edited pf.conf through the real
+// parser (-n loads nothing, and needs no root).
+func TestInstalledPfConfParses(t *testing.T) {
+	if _, err := os.Stat(pfctlPath); err != nil {
+		t.Skip("no pfctl on this machine")
+	}
+	conf := installBoth(t, stockPfConf)
+	f, err := os.CreateTemp(t.TempDir(), "pf.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(conf); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if out, err := exec.Command(pfctlPath, "-n", "-f", f.Name()).CombinedOutput(); err != nil {
+		t.Fatalf("pfctl rejected the installed pf.conf: %v\n%s\n%s", err, out, conf)
 	}
 }

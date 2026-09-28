@@ -267,6 +267,11 @@ flags:
 	}
 
 	fw := backend.New()
+	// This process exits once the gap is open or widened, so anything it
+	// started that would outlive it (the leak log reader) is stopped first.
+	if d, ok := fw.(interface{ Detach() }); ok {
+		defer d.Detach()
+	}
 
 	if fs.NArg() > 0 {
 		return extendGap(ctx, fw, prober, fs.Args())
@@ -550,6 +555,15 @@ func printReport(sess *state.Session, redact, verbose bool, auditLog string) {
 	}
 	fmt.Println("\n--- what happened while portalguard was engaged ---")
 	fmt.Print(rep.String())
+	if st, ok := sess.DNSFilterStats(); ok {
+		fmt.Printf("\nThe DNS filter refused %d lookup(s) for %d name(s); none of them left this machine.\n",
+			st.Refused, len(st.RefusedNames))
+		fmt.Printf("It let %d through, for the %d name(s) the login needed", st.Forwarded, len(st.ForwardedNames))
+		if !redact && len(st.ForwardedNames) > 0 {
+			fmt.Printf(": %s", strings.Join(st.ForwardedNames, ", "))
+		}
+		fmt.Println(".")
+	}
 	fmt.Println("---")
 	if verbose && rep.ProcessNote != "" {
 		fmt.Printf("\ndiagnostic: process attribution backed off: %s\n", rep.ProcessNote)
@@ -603,6 +617,7 @@ flags:
 	var vpns endpointFlags
 	fs.Var(&vpns, "vpn", vpnFlagHelp)
 	noHandoff := fs.Bool("no-handoff", false, "stop at SEALED instead of handing over to your VPN")
+	noDNSFilter := fs.Bool("no-dns-filter", false, "let the gap's DNS go straight to the network's resolver, for every app, as v0.2 did")
 	handoffWait := fs.Duration("handoff-wait", 3*time.Minute, "how long to wait for the VPN tunnel after sealing")
 	auditLog := fs.String("audit-log", "", "write the full, unredacted report to this file (never to stdout) - for verifying a -redact run against ground truth without displaying it")
 	if err := fs.Parse(args); err != nil {
@@ -650,6 +665,13 @@ flags:
 
 		if err := sess.Lockdown(ctx); err != nil {
 			return err
+		}
+		// Before the gap, so its rules carry the filter from the first load.
+		// Without it the gap still works, with the machine-wide DNS hole.
+		if !*noDNSFilter {
+			if err := sess.StartDNSFilter(ctx); err != nil {
+				logf("dns filter off, so every app's lookups can reach the network during the gap: %v", err)
+			}
 		}
 		if err := sess.OpenGap(ctx); err != nil {
 			// The lockdown is still standing; release it rather than

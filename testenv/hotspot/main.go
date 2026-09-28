@@ -40,6 +40,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -100,6 +101,13 @@ func main() {
 type portal struct {
 	config
 	authed atomic.Bool
+
+	// Names asked of this network's DNS since /dnsmark, which is how a test
+	// proves what left the machine during the gap: this server is the
+	// network's resolver, so a name that never arrives here never left.
+	logMu   sync.Mutex
+	marked  bool
+	dnsSeen []string
 }
 
 func (p *portal) host(sub string) string { return sub + "." + p.domain }
@@ -134,6 +142,8 @@ func runWWW(c config) {
 	site.HandleFunc("/accept", p.handleAccept)
 	site.HandleFunc("/reset", p.handleReset)
 	site.HandleFunc("/status", p.handleStatus)
+	site.HandleFunc("/dnsmark", p.handleDNSMark)
+	site.HandleFunc("/dnslog", p.handleDNSLog)
 	site.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/login", http.StatusFound)
 	})
@@ -200,6 +210,38 @@ func (p *portal) handleStatus(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"authenticated": p.authed.Load()})
 }
 
+// handleDNSMark starts a fresh record of the names asked of this resolver.
+func (p *portal) handleDNSMark(w http.ResponseWriter, r *http.Request) {
+	p.logMu.Lock()
+	p.marked, p.dnsSeen = true, nil
+	p.logMu.Unlock()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleDNSLog returns every distinct name asked since the mark.
+func (p *portal) handleDNSLog(w http.ResponseWriter, r *http.Request) {
+	p.logMu.Lock()
+	names := append([]string(nil), p.dnsSeen...)
+	p.logMu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(names)
+}
+
+func (p *portal) recordDNS(name string) {
+	name = strings.TrimSuffix(strings.ToLower(name), ".")
+	p.logMu.Lock()
+	defer p.logMu.Unlock()
+	if !p.marked {
+		return
+	}
+	for _, n := range p.dnsSeen {
+		if n == name {
+			return
+		}
+	}
+	p.dnsSeen = append(p.dnsSeen, name)
+}
+
 // ==== the DNS server ======================================================
 // The portal's own names always resolve truthfully. Everything else points
 // at the portal until login, and at "the internet" after it.
@@ -237,6 +279,7 @@ func (p *portal) serveDNS() {
 			continue
 		}
 		log.Printf("dns: %s asked for %s", from, name)
+		p.recordDNS(name)
 		_, _ = conn.WriteTo(reply, from)
 	}
 }

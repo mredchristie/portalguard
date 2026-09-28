@@ -378,16 +378,76 @@ it matches everything and changes nothing. It is the same reason the leak
 report's process attribution comes back as the kernel's "not attributed"
 value rather than an app: there is no app on the packet to attribute.
 
-**v0.3: a filtering resolver.** For the length of the gap, Portalguard runs
-its own resolver on `127.0.0.1` and points the system at it. It forwards only
-names under the portal's registrable domain and names a human has passed to
-`allow`, answers everything else `REFUSED`, and keeps its own record of every
-refusal, so the "looked up but not open" suggestions come from that record
-instead of a `tcpdump` decode. The pf DNS rule then has only one socket to let
-through to the network's resolver: Portalguard's. The cost is that it changes
-the system's DNS settings while the gap is open, so a crash has to put them
-back, and that restore needs the same fail-safe care the pf anchor gets. That
-is why it is its own release.
+**v0.3: a filtering resolver, built and proven live.** For the length of the
+gap, `run` runs a resolver of its own on `127.0.0.1:53530`
+(`internal/dnsfilter`). It forwards an exact-name allowlist (the portal host,
+the hosts it redirected through, the probe endpoints, remembered hosts, and
+anything passed to `allow`) and answers everything else `REFUSED`, so those
+names never leave the machine. Its refusals feed the "looked up but not open"
+suggestions.
+
+It is reached by redirection, not by changing the system's DNS settings, so
+the one-command undo survives: flushing the anchor removes the redirect, and a
+crash cannot leave DNS pointed somewhere dead.
+
+```pf
+rdr pass on lo0 inet proto { udp, tcp } from any to <pg_dns> port 53 -> 127.0.0.1 port 53530
+...
+pass out log (all, user, to pflog1) quick inet proto udp from any port 41053 to <pg_dns> port 53 keep state
+pass out quick route-to (lo0 127.0.0.1) inet proto { udp, tcp } from any to <pg_dns> port 53 keep state
+```
+
+Every DNS packet bound for the network's resolvers is routed back to
+loopback, where the `rdr` hands it to the filter. The filter's own upstream
+queries leave from source port 41053, below macOS's ephemeral range so no
+ordinary socket lands on it, and that is the only DNS pf lets out. The hole
+is one socket wide instead of machine-wide.
+
+Three things it needed:
+
+- **A second hook.** pf applies `rdr` only from anchors the main ruleset
+  reaches with `rdr-anchor`, and those must sit in pf.conf's translation
+  section. `install-anchor` adds a second marked block after Apple's own
+  `rdr-anchor` line, and upgrades a v0.2 install in place. Without the hook,
+  the filter is refused and the gap keeps the machine-wide hole, rather than
+  divert DNS to a redirect that never happens.
+- **Resolving `allow` through the filter directly.** The first live run
+  failed with "no such host": the browser's lookup had just been refused,
+  and mDNSResponder handed the cached refusal back to `allow`. `allow` now
+  asks the filter itself, then flushes the system cache so the browser's
+  reload asks again too.
+- **Not counting diverted packets as leaks.** The `route-to` rule names the
+  resolvers, so the leak report first counted every refused query as DNS
+  that went out.
+
+Proven with the off-box hotspot, whose DNS server is the network's resolver
+and records every name it hears once the gap opens (`make hotspot-demo`):
+with the filter, nothing reached it but the login's own names, and 65 lookups
+for 22 other names were refused on the machine. The control run
+(`DNS_FILTER=off`) leaked 20 names in the same 20 seconds, among them
+service-discovery lookups that name the home network (`b._dns-sd._udp.home`).
+
+It covers both address families. The first e2e run on a real LAN found
+macOS sending every lookup to the router's IPv6 resolver, which an IPv4-only
+filter could neither answer nor forward, so the filter listens on `::1` too,
+forwards to IPv6 resolvers from the same fixed port, and pf redirects both
+families. (The IPv6 redirect is proven by `pfctl` parsing it and by that run
+working; the spike's direct IPv6 lookups have not yet met a network that
+listed an IPv6 resolver at the time.)
+
+**A VPN kill switch can switch it off, and that is detected.** No rule is
+applied on an interface pf skips, and NordVPN's kill switch loads a ruleset
+with `set skip on lo0` that stays loaded after it disconnects, along with a
+main ruleset that no longer reaches our anchors. Found when the redirect,
+proven that morning, silently stopped working. Before starting the filter,
+Portalguard checks for `lo0 (skip)` and, if it is set, refuses the filter and
+keeps the machine-wide hole, saying why, rather than divert DNS into a
+redirect that never happens. `install-anchor` now reloads `/etc/pf.conf` when
+the hooks are on disk but not loaded, which clears the skip too.
+
+Its limits: only `run` hosts the filter, since it needs a process that stays
+up for the whole gap, so the separate `lockdown`/`allow`/`seal` commands keep
+the machine-wide hole. `-no-dns-filter` turns it off.
 
 Addresses are **pinned at detection time**. The gap is written against the IPs
 the portal resolved to when we probed, not against a hostname. Otherwise a
@@ -1247,11 +1307,11 @@ the reasoning survives the next person who wonders why.
    the inbound rule is scoped to one protocol and port pair the OS parses
    anyway. DHCPv6 is acknowledged in a comment rather than allowed for.
 3. **DNS is the widest part of the gap.** Accepted, with the real leak named
-   rather than the exotic one - see "The DNS hole is machine-wide". v0.1 ships
+   rather than the exotic one - see "The DNS hole is machine-wide". v0.1 shipped
    the cheap mitigation: keep the gap short, log every query made through it,
    and report the count when the gap closes. The `user`-scoped rules once
-   planned for v0.2 cannot work on macOS (see "The DNS hole is
-   machine-wide"); the fix is a filtering resolver, v0.3.
+   planned for v0.2 cannot work on macOS; v0.3 closes the hole with a
+   filtering resolver, in `run`.
 4. **`--allow-active-vpn` as an opt-in escape hatch** rather than a hard
    refusal. Approved: a hard refusal punishes anyone whose VPN the detection
    misreads. Opt-in, loud, logged.

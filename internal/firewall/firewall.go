@@ -158,6 +158,18 @@ type Enforcer interface {
 	Enforced(ctx context.Context) (ok bool, why string)
 }
 
+// ==== filtering the gap's DNS ==============================================
+
+// DNSFilterer is implemented by backends that can send the gap's DNS through
+// Portalguard's own resolver (internal/dnsfilter) instead of straight to the
+// network's. Optional: a backend without it keeps the machine-wide DNS hole.
+type DNSFilterer interface {
+	// UseDNSFilter makes the gaps loaded from now on filter their DNS. The
+	// resolver must already be listening. It fails, changing nothing, when
+	// the backend cannot redirect DNS.
+	UseDNSFilter(ctx context.Context) error
+}
+
 // ==== handing over to the VPN =============================================
 // Between sealing and the tunnel coming up, only the VPN's own handshake may
 // leave. Releasing first, as v0.1 did, leaks everything in between.

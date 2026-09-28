@@ -35,7 +35,10 @@ cleanup() {
     "$BIN" release >/dev/null 2>&1
     rm -f "$CAP"
 }
-trap cleanup EXIT INT TERM
+# An interrupt must exit: a trap that only cleans up lets the script carry on
+# from wherever it was, against a machine it has just put back.
+trap cleanup EXIT
+trap 'exit 130' INT TERM
 
 send() { printf 'portalguard-handover-test' | nc -u -w1 "$DST" "$1" >/dev/null 2>&1; }
 seen() { grep -c "$DST\.$1:" "$CAP"; }

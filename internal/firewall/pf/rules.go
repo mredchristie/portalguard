@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"portalguard/internal/dnsfilter"
 	"portalguard/internal/firewall"
 )
 
@@ -56,6 +57,10 @@ type gap struct {
 	// vpn is the handover hole: a VPN client's handshake, and nothing else,
 	// while the lockdown otherwise stands. Never set alongside a gap.
 	vpn []firewall.Endpoint
+	// dnsFilter sends the gap's DNS through Portalguard's own resolver
+	// (internal/dnsfilter) instead of straight to the network's: pf redirects
+	// it to 127.0.0.1, and only the filter's upstream port may leave.
+	dnsFilter bool
 	// logTo names the pflog interface the DNS rules log to. Empty means log
 	// without naming a device, which pf sends to pflog0 and discards harmlessly
 	// if that does not exist either. It is empty whenever we could not create
@@ -168,6 +173,20 @@ func render(g gap) string {
 		b.WriteString("\n")
 	}
 
+	if g.isOpen() && g.dnsFilter && len(g.dnsAddrs) > 0 {
+		// Translation before filtering, as pf requires. rdr pass hands the
+		// redirected query straight to the filter on loopback.
+		b.WriteString("# The DNS filter: every query for this network's resolvers comes back in on\n")
+		b.WriteString("# loopback (see route-to below) and is redirected to Portalguard's resolver,\n")
+		b.WriteString("# which forwards only the names the login needs. Needs the rdr-anchor hook.\n")
+		// Both families: a dual-stack network hands out an IPv6 resolver too,
+		// and macOS may send every lookup to it.
+		fmt.Fprintf(&b, "rdr pass on lo0 inet  proto { udp, tcp } from any to <%s> port 53 -> 127.0.0.1 port %d\n",
+			dnsTable, dnsfilter.ListenPort)
+		fmt.Fprintf(&b, "rdr pass on lo0 inet6 proto { udp, tcp } from any to <%s> port 53 -> ::1 port %d\n\n",
+			dnsTable, dnsfilter.ListenPort)
+	}
+
 	b.WriteString(preamble)
 
 	if g.isOpen() {
@@ -191,7 +210,20 @@ func render(g gap) string {
 					af, checkTable, renderPorts(g.checkPorts))
 			}
 		}
-		if len(g.dnsAddrs) > 0 {
+		if len(g.dnsAddrs) > 0 && g.dnsFilter {
+			b.WriteString("\n# DNS, filtered. Only Portalguard's resolver, from its one fixed source port,\n")
+			b.WriteString("# may reach this network's resolvers; it forwards only the names the login\n")
+			b.WriteString("# needs. Every other query is sent back to loopback, where the rdr above\n")
+			b.WriteString("# hands it to that resolver. The hole is one socket wide, not machine-wide.\n")
+			for _, af := range []string{"inet ", "inet6"} {
+				fmt.Fprintf(&b, "pass out %s quick %s proto udp from any port %d to <%s> port 53 keep state\n",
+					g.logClause(), af, dnsfilter.UpstreamPort, dnsTable)
+			}
+			fmt.Fprintf(&b, "pass out quick route-to (lo0 127.0.0.1) inet  proto { udp, tcp } from any to <%s> port 53 keep state\n",
+				dnsTable)
+			fmt.Fprintf(&b, "pass out quick route-to (lo0 ::1) inet6 proto { udp, tcp } from any to <%s> port 53 keep state\n",
+				dnsTable)
+		} else if len(g.dnsAddrs) > 0 {
 			b.WriteString("\n# DNS to this network's resolvers and only them. This hole is machine-wide:\n")
 			b.WriteString("# every background daemon's queued lookups fire through it the moment it\n")
 			b.WriteString("# opens. Connections stay blocked, hostnames do not.\n")

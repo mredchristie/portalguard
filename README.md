@@ -39,7 +39,12 @@ do.
 
 ## Status
 
-v0.2. Two additions over v0.1:
+v0.3. It adds **the DNS filter**: while the gap is open, only the names the
+login needs reach the network's resolver, and every other app's lookups are
+refused on the machine. Proven against the off-box test portal and on a real
+LAN, with a control run each time. See "The DNS filter (v0.3)" below.
+
+v0.2 added two things over v0.1:
 
 - **The handover to your VPN.** v0.1 released every rule and then asked you
   to start the VPN, so everything queued on the machine went out in the clear
@@ -265,16 +270,29 @@ interface, the name is tunnel-shaped, and the interface has an address. The
 last rules out macOS's own permanently-up, addressless `utun` devices, of
 which there are usually seven.
 
-One known limitation, detailed in [`docs/pf-design.md`](docs/pf-design.md):
+## The DNS filter (v0.3)
 
-- **The DNS hole in `GAP_OPEN` is machine-wide.** Background daemons' queued
-  lookups fire at the portal's resolver the moment it opens. Connections
-  stay blocked, but hostnames leak. Portalguard keeps the gap short and logs
-  what went through. The fix once planned for v0.2, scoping the DNS rule to
-  the browser's user id, cannot work on macOS: apps do not send their own DNS
-  queries, they ask `mDNSResponder`, which sends them all as one system user.
-  The real fix is a filtering resolver of Portalguard's own, planned for
-  v0.3; see "The DNS hole is machine-wide" in `docs/pf-design.md`.
+While the gap is open, the network's resolver used to hear every name every
+app on the machine asked for: mail, sync, telemetry, and service-discovery
+lookups that name your home network. `run` now filters it. pf redirects the
+gap's DNS to a resolver inside Portalguard, which forwards only the names the
+login needs (the portal, the hosts it redirected through, the probe
+endpoints, remembered hosts, and anything you `allow`) and refuses the rest
+on the machine:
+
+```
+The DNS filter refused 65 lookup(s) for 22 name(s); none of them left this machine.
+It let 15 through, for the 5 name(s) the login needed.
+```
+
+It needs the second pf.conf hook added in v0.3, so run `sudo portalguard
+install-anchor` once after upgrading. Without it, `run` says so and carries
+on with the machine-wide hole. The same happens if a VPN kill switch has left
+pf skipping loopback (NordVPN does, even after disconnecting); run
+`install-anchor` again with the VPN off and it reloads pf's own rules. `-no-dns-filter` turns it off. The separate
+`lockdown`/`allow`/`seal` commands do not filter DNS, because the filter needs
+a process that stays up for the whole gap. Details and the live proof are in
+"The DNS hole is machine-wide" in [`docs/pf-design.md`](docs/pf-design.md).
 
 ## Handing over to your VPN
 

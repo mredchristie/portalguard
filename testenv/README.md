@@ -142,8 +142,29 @@ ok   cdn blocked before allow (off-box, so pf is really filtering)
 ok   cdn reachable after allow
 ok   login completes through reg
 ok   run noticed the login and sealed
+ok   no other app's DNS left the machine during the gap
 all checks passed
 ```
+
+The last check is the v0.3 DNS filter's. The hotspot's DNS server is this
+network's resolver, and from the moment the gap opens it records every name
+it is asked (`/dnsmark`, then `/dnslog`). A name it never heard never left the
+Mac, so the check passes only if nothing reached it but the login's own
+names. `sudo env DNS_FILTER=off ./testenv/hotspot-demo.sh first` runs without
+the filter, as a control: that check should fail, listing what every other
+app on the machine asked for during the gap.
+
+`make e2e` covers both v0.2 and v0.3 on the real LAN too: PHASE E checks the
+handover hole on the wire, and PHASE F runs the filter and asserts pf counted
+no DNS leaving. It needs the fake portal running: `make e2e-portal` in a
+second terminal (plain Go, no container runtime), with no VPN connected; both
+refuse to start when one holds the default route. It ends with a per-phase
+table, and writes the same as JSON to `/tmp/portalguard-e2e.json`, which is
+what the portfolio's replay of the run is built from.
+
+`make dns-spike` is the filter's groundwork on its own: it proves pf can
+divert this Mac's DNS to a local resolver at all, with a fake resolver that
+answers every name with a marker address.
 
 `hotspot-known` is the next visit to the same network: `remember` saved `cdn`
 and `reg` under `guestwifi.test`, so `run` tries them itself, opening each only

@@ -244,6 +244,27 @@ func (r *logReader) Stop() (names, processes []string, unavailable bool, note st
 	return names, processes, r.processesUnavailable, r.note, declinedByKernel
 }
 
+// Peek returns the hostnames seen so far, leaving both tcpdump processes
+// running.
+//
+// Stop is the only other way to read this set, and it reads it once, at the
+// end, when the gap is already closing. That is too late for the question a
+// user standing in front of a half-rendered login page is actually asking:
+// which host did that page just ask for and not get. Peek exists so the
+// names can be read while the gap is still open and still widenable.
+//
+// It reports lookups, not blocks. DNS is open through the gap, so a name
+// here means something on this machine resolved it, not that the connection
+// which followed was allowed - and the set includes every background
+// daemon's lookups too, because the DNS hole is machine-wide. Filtering that
+// into something worth showing a person is the caller's job, not the
+// reader's; see state.SuggestAllow.
+func (r *logReader) Peek() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return setToSortedSlice(r.names)
+}
+
 func setToSortedSlice(m map[string]struct{}) []string {
 	if len(m) == 0 {
 		return nil

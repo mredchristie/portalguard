@@ -4,6 +4,7 @@ package pf
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -89,12 +90,18 @@ func stripRuleNumber(line string) string {
 // ==== adding it up ========================================================
 // pf resets counters on reload, so bank them before every reload.
 
-// tally is the running total across every ruleset this process has loaded.
+// tally is the running total across every ruleset loaded during this
+// engagement, by any invocation. It is persisted between processes; see
+// counterPath in persist.go for why it has to be.
 type tally struct {
 	blockedOutPkts, blockedOutBytes uint64
 	blockedInPkts, blockedInBytes   uint64
 	dnsPkts, dnsBytes               uint64
 	portalPkts, portalBytes         uint64
+	checkPkts, checkBytes           uint64
+	// attempts and failures count samples, not packets, so an empty report
+	// can say whether the network was quiet or the measurement broke.
+	attempts, failures int
 }
 
 // add folds one sample of the live counters into the running total.
@@ -113,6 +120,9 @@ func (t *tally) add(rules []ruleCounters) {
 		case rolePortal:
 			t.portalPkts += rc.packets
 			t.portalBytes += rc.bytes
+		case roleCheck:
+			t.checkPkts += rc.packets
+			t.checkBytes += rc.bytes
 		}
 	}
 }
@@ -126,6 +136,7 @@ const (
 	roleBlockIn
 	roleDNS
 	rolePortal
+	roleCheck
 )
 
 // classify recovers a rule's purpose from the text pfctl prints back, which is
@@ -148,6 +159,9 @@ func classify(rule string) role {
 		if strings.Contains(rule, "<"+portalTable+">") {
 			return rolePortal
 		}
+		if strings.Contains(rule, "<"+checkTable+">") {
+			return roleCheck
+		}
 		return roleOther
 	default:
 		return roleOther
@@ -158,18 +172,46 @@ func classify(rule string) role {
 //
 // It must be called immediately before any reload or flush, because that is
 // what resets them. Failures are swallowed: losing an accounting sample must
-// never stop the firewall operation it was attached to.
+// never stop the firewall operation it was attached to. They are counted
+// though, so the report can tell a quiet network from a broken measurement.
+//
+// The running total is re-read from disk before every sample and written back
+// after it, because pf's counters are shared by every process on the machine
+// and so the account of them has to be too. See counterPath in persist.go.
 //
 // The caller must hold b.mu.
 func (b *Backend) sampleCountersLocked(ctx context.Context) {
 	if b.phase == firewall.PhaseOff {
 		return
 	}
+
+	// Adopt the machine's total, but only if there genuinely is one. A failed
+	// read must not be mistaken for a total of zero: on a machine where
+	// /var/run cannot be written, this degrades to accumulating in memory,
+	// which is exactly the behaviour it replaces rather than something worse.
+	if disk, ok := loadTally(); ok {
+		b.counters = disk
+	}
+	b.counters.attempts++
+
 	out, err := b.pfctl(ctx, "-a", AnchorName, "-s", "rules", "-v")
 	if err != nil {
-		return
+		b.counters.failures++
+	} else {
+		b.counters.add(parseRuleCounters(out))
 	}
-	b.counters.add(parseRuleCounters(out))
+	b.persistCountersLocked()
+}
+
+// persistCountersLocked writes the running total back out, reporting a
+// persistent failure once rather than on every sample.
+func (b *Backend) persistCountersLocked() {
+	if err := saveTally(b.counters); err != nil && !b.counterNoteMade {
+		b.counterNoteMade = true
+		b.appendNote(fmt.Sprintf(
+			"could not record the running packet counts (%v); a `%s` from another process will reset pf's counters without handing them back, so the leak report may undercount",
+			err, AnchorName))
+	}
 }
 
 // ==== the report ==========================================================
@@ -194,14 +236,39 @@ func (b *Backend) reportLocked() firewall.Report {
 		DNSBytes:                  b.counters.dnsBytes,
 		PortalPackets:             b.counters.portalPkts,
 		PortalBytes:               b.counters.portalBytes,
+		CheckPackets:              b.counters.checkPkts,
+		CheckBytes:                b.counters.checkBytes,
 		Resolvers:                 b.resolvers,
 		Names:                     b.leakNames,
 		Processes:                 b.leakProcesses,
 		ProcessesUnavailable:      b.leakProcessesUnavailable,
 		ProcessesDeclinedByKernel: b.leakProcessesDeclinedByKernel,
 		ProcessNote:               b.leakProcessNote,
+		SampleAttempts:            b.counters.attempts,
+		SampleFailures:            b.counters.failures,
 		Source:                    "pf rule counters, pfctl -a portalguard -s rules -v",
 	}
 }
 
+// NamesSeen returns the hostnames looked up through the gap so far, while it
+// is still open.
+//
+// This is deliberately not part of the report: the report is the account
+// rendered at seal, when nothing can be done about it any more, and this is
+// the same evidence read early enough to act on. After a seal or a release
+// the reader is gone and this returns what it finished with, which is the
+// same list the report carries.
+//
+// Nothing here is filtered. These are lookups, not blocks, from every
+// process on the machine - see logReader.Peek.
+func (b *Backend) NamesSeen() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.reader != nil {
+		return b.reader.Peek()
+	}
+	return append([]string(nil), b.leakNames...)
+}
+
 var _ firewall.Reporter = (*Backend)(nil)
+var _ firewall.NameWatcher = (*Backend)(nil)

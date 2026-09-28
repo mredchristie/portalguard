@@ -4,7 +4,8 @@ How Portalguard is put together, and - the part that matters more - which of
 its claims are actually demonstrated and which are still assertions.
 
 For the firewall rules themselves, line by line, see
-[`pf-design.md`](pf-design.md).
+[`pf-design.md`](pf-design.md). For how wide the gap should be, and why that is
+a harder question than it looks, see [`gap-scope.md`](gap-scope.md).
 
 ## The shape
 
@@ -42,7 +43,14 @@ IDLE ──detect──> DETECTING ──portal found──> PORTAL_FOUND ──
                                                                        re-probe succeeds
                                                                               v
 HANDED_OFF <──hand off── SEALED <──seal── AUTHENTICATED
+     ^
+     └──────────hand off── LOCKED_DOWN   (no portal: just waiting for the VPN)
 ```
+
+`hand off` is not a release. Until a VPN tunnel carries the default route,
+the lockdown stays, with only the VPN client's own connection allowed out;
+the rules come down only once the tunnel is up. See "The handover" in
+[`pf-design.md`](pf-design.md).
 
 It is table-driven, and **anything absent from the table is rejected**. That is
 not stylistic: the transition it exists to forbid is `PORTAL_FOUND → GAP_OPEN`,
@@ -58,11 +66,55 @@ Two design choices worth stating:
 Portalguard never reads the portal's own "you are connected" page. A portal
 that lies about that is not a hypothetical.
 
-**The machine lives in one process.** `run` holds it for a whole cycle. The
-separate commands (`lockdown`, `allow`, `seal`) each start a fresh machine, and
-only the *firewall* state is recovered across invocations, by reading the
-kernel. This is honest but limited, and it is why the end-to-end test drives
-`run` rather than stepping through commands.
+**The machine is recovered, not held.** `run` drives a whole cycle in one
+process, but each command is its own process, so a second invocation rebuilds
+the machine rather than inheriting it. See "Picking the machine back up" below.
+
+## Picking the machine back up
+
+Every command is a separate process, so `sudo portalguard allow cdn.example.net`
+has to work out for itself what the `run` waiting in the other terminal already
+did. Two sources, and the order between them is the whole safety argument.
+
+**The kernel decides.** The loaded ruleset is read back at the start of any
+command that acts on the firewall: which rules are loaded, and whether any of
+them points at a gap table. That gives the phase - `OFF`, `LOCKED`, `GAP` - and
+the addresses and ports currently permitted. It cannot be out of date, because
+it *is* the thing doing the filtering.
+
+**A session file enriches.** `/var/run/portalguard.session` holds what no packet
+filter can: which state the machine had reached, and the hostnames and reasons
+behind the addresses in the tables. `/var/run` for the same reason the pf enable
+token lives there - root-only, and cleared on reboot, which matches the lifetime
+of everything else Portalguard installs.
+
+The file is only ever allowed to choose **between states that share a phase**.
+A bare lockdown and a sealed gap are byte-for-byte the same ruleset, so the file
+gets to say which one it is; nothing else. A file claiming `GAP_OPEN` over a
+ruleset that permits nothing is ignored, and a file left behind by a process
+that died is discarded the moment the kernel reports `OFF`.
+
+That ordering is why nothing has to guarantee the file gets cleaned up. **The
+worst a stale snapshot can do is be ignored.** It is written best-effort for the
+same reason the pf token is: refusing to lock a machine down because a
+bookkeeping file would not write is the tail wagging the dog. Losing it costs
+the hostnames, not the gap.
+
+Two things follow that are easy to miss:
+
+- **Widening had to be fixed underneath the state machine as well.** pf loads a
+  table declaration as a *replacement*. A second process rendering its ruleset
+  from an empty allow-list plus one new host would have evicted the portal
+  address and the resolvers the first process pinned - the gap would appear to
+  widen while actually moving, and the login page would go dead at the moment
+  the user added the host meant to fix it. Recovering the allow-list from the
+  kernel is what makes `allow` additive rather than destructive.
+- **`allow <host>` installs no safety net.** Everywhere else, the process that
+  engages the firewall releases it on the way out. Here the firewall belongs to
+  another process, and a Ctrl-C between two hostnames must not tear down a
+  lockdown this one never installed and cannot put back. Widening is additive
+  and leaves nothing to unwind, so exiting without touching anything is the
+  correct failure.
 
 ## The backend interface
 
@@ -93,6 +145,20 @@ A backend that cannot account for its own traffic is simply not a `Reporter`,
 rather than stubbing a method that returns zeros. Zeros from a backend that
 did not measure are indistinguishable from zeros on a quiet network, and the
 whole point of the leak report is not to make that mistake.
+
+`NameWatcher` is the second optional capability, on the same reasoning:
+
+```go
+type NameWatcher interface { NamesSeen() []string }
+```
+
+It answers a different question at a different time. A report accounts for a
+window that has closed; this is evidence about one still open, and it is worth
+having only because the user can still act on it - a portal host missing from
+the gap can still be added to it. What it returns is raw: lookups rather than
+blocks, from every process on the machine, because the DNS hole is machine-
+wide. `state.SuggestAllow` does the filtering, and is the only place the
+"is this the portal's host" heuristic lives.
 
 `Host` pins addresses, never names. A portal that controls DNS - which, per the
 hijack check, it usually does - could otherwise repoint its own hostname after
@@ -138,6 +204,15 @@ Verified on real hardware, and re-verified by `testenv/e2e.sh`:
 | Teardown leaves nothing behind | e2e Phase C: both tables empty, log device destroyed, network restored |
 | Counters survive rule reloads | Integration test against a fake pfctl, driving the whole sequence |
 | The machine recovers from a crash | Signal and panic handlers release; `make rescue` proven against an empty container |
+| A second process widens a gap rather than replacing it | Unit test driving two backends against one fake kernel; live at BT Wi-Fi; and `make hotspot-demo` |
+| A blank page's missing hosts are named, and only those | `make hotspot-demo`: `cdn` and `reg` suggested against an off-box portal, nothing else |
+| The re-probe sees the login finish once the probe names resolve outside the gap | `make hotspot-demo`, through `<pg_check>` |
+| A remembered host opens only after a live TLS check | `make hotspot-known`, against certificates the system trusts |
+| Hostnames opened by `allow` survive into a later `remember` | `make hotspot-demo`, three separate processes |
+| The handover lets VPN traffic out, nothing else, and closes on timeout | `make handoff-check`: a UDP packet to 51820 leaves, one to 9 does not, and 51820 is dropped again once the hole closes, seen on the wire |
+| A VPN kill switch taking over the firewall is noticed, not missed | Live with NordVPN: its ruleset replaced ours on connect, and the handover reported it and cleaned up |
+| A stale session file cannot claim a gap the ruleset denies | Unit tests over every phase/snapshot pairing |
+| Detection survives a real portal | BT Wi-Fi, live: portal found, host pinned, non-standard port carried through, clean release |
 
 ## What is not proven
 
@@ -155,6 +230,15 @@ genuinely off-box and has a real portal's topology. The portal-semantics half
 aims at the container over `lo0`, where pf is not involved. Each half is
 meaningful; neither is the whole claim.
 
+**The off-box hotspot joins the two halves.** `testenv/hotspot/` runs a
+BT-shaped portal across four containers under Apple's `container` tool, each
+with its own address reached over `bridge100`, which pf filters like any other
+interface. It exercises the portal semantics and pf together, with the default
+probe list and the network's own DNS, and its first live runs found three bugs
+every earlier test had passed: the re-probe and the remembered-host
+certificate check were both dropped by the lockdown, and `allow` lost the
+names of what it opened. See `testenv/README.md`, "The off-box hotspot".
+
 **`GAP_OPEN` narrowness is proven by the e2e test, not by the demo.** This is
 worth being precise about, because the two get conflated. The e2e test does
 demonstrate it: the gateway is reachable through the gap while a control host
@@ -167,20 +251,39 @@ presenting the demo should not claim it shows the gap working.
 - A genuinely hostile network. The gateway cooperates: it does not hijack DNS,
   intercept probes, or drop packets. The hijack detection is unit-tested but
   has never met a real portal.
-- The handoff to the VPN. `HANDED_OFF` releases the rules and the user then
-  starts the tunnel, leaving a brief unprotected window - a smaller version of
-  the problem this tool exists to solve. Closing it means keeping the lockdown
-  and permitting only the VPN's endpoint, which needs the endpoint address.
+- A VPN client that actually depends on the handover hole. The hole's rules
+  are proven on the wire, but neither VPN on the test machine uses it:
+  NordVPN's kill switch takes the firewall over on connect, and the WireGuard
+  app takes the default route before its handshake, so the handover steps
+  aside first. An OpenVPN or IKEv2 client, which handshakes before taking the
+  route, is the case still to run. Some clients also call their provider's API
+  before connecting, which the hole does not allow.
 - The DNS hole in `GAP_OPEN` is machine-wide. Background daemons do leak
-  hostnames through it. v0.1 counts them and says so; scoping the rules to the
-  browser's user id is the fix and is not built.
+  hostnames through it; Portalguard counts them and says so. Scoping the rule
+  to the browser's user id, once the plan, cannot work on macOS, because every
+  lookup is sent by `mDNSResponder`. The fix is a filtering resolver, v0.3.
 - DHCP lease expiry mid-lockdown, IPv6-only networks, and roaming between
   networks while engaged.
 - Linux and Windows. The packages exist with their designs recorded in the
   package docs. No rule has ever been programmed on either.
 
-**One structural limitation:** the state machine does not persist across
-invocations, only the firewall state does. Stepping through `lockdown`,
-`allow`, `seal` as separate commands works at the firewall level but starts a
-fresh machine each time. A menu bar app will hold one process and not hit this;
-a shell script driving the individual commands will.
+**The gap is one host wide, and real portals are not.** BT Wi-Fi spans four
+hostnames across three ports; the gap opened for the first of each, and the
+login page rendered blank because the script that reveals it was blocked.
+`allow` is the answer and now works across processes, and `run` now names the
+hosts being looked up that the gap does not include, so the user is not left
+diagnosing a blank page with no internet. A network dealt with once can now be
+remembered - `portalguard remember` saves what `allow` widened the gap with,
+and the next visit tries those hosts automatically, but only the ones that
+complete a fresh TLS handshake with a certificate valid for their name; DNS on
+a hostile network proves nothing, so nothing here is opened on DNS's word
+alone. All of it is proven against real pf and the off-box hotspot, and none of it
+has been back to BT Wi-Fi since. What a real rogue access point does when it
+meets the TLS check is still untested: the rejection is proven against a
+self-signed server in a unit test, not live. The options, and the ones taken, are in
+[`gap-scope.md`](gap-scope.md).
+
+**Cross-process resume is field-tested.** `allow` widened a live gap from a
+second terminal at BT Wi-Fi, and does so on every `make hotspot-demo`. What
+the hotspot added was the proof that the names survive as well as the
+addresses: `remember` in a third process saves the hosts `allow` opened.

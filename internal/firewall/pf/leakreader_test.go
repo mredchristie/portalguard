@@ -5,6 +5,8 @@ package pf
 import (
 	"encoding/binary"
 	"errors"
+	"io"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -44,6 +46,37 @@ func TestDNSQueryRegexNoFalseMatchOnANonDNSLine(t *testing.T) {
 	line := "03:43:46.046120 rule 0..0/0(match): pass in on lo0: 127.0.0.1 > 127.0.0.1: ICMP 127.0.0.1 udp port 53 unreachable, length 36"
 	if m := dnsQueryRe.FindStringSubmatch(line); m != nil {
 		t.Errorf("unexpected match on a non-DNS line: %v", m)
+	}
+}
+
+// TestPeekReadsNamesWithoutStopping covers the difference that made Peek
+// worth having: the names can be read while the gap is still open, and
+// reading them does not consume them.
+func TestPeekReadsNamesWithoutStopping(t *testing.T) {
+	r := newLogReader()
+	// Two real-shaped tcpdump DNS lines, one of them the host from the BT
+	// Wi-Fi case in docs/gap-scope.md that the gap did not include.
+	lines := strings.Join([]string{
+		"1787786165.262353 IP 192.168.23.5.54954 > 192.168.23.1.53: 21564+ A? www.btwifi.com. (53)",
+		"1787786165.262403 IP 192.168.23.5.60672 > 192.168.23.1.53: 10870+ A? cdn.btwifi.com. (53)",
+	}, "\n")
+	r.readText(io.NopCloser(strings.NewReader(lines)))
+
+	want := []string{"cdn.btwifi.com", "www.btwifi.com"}
+	got := r.Peek()
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Peek() = %v, want %v", got, want)
+	}
+	// Twice, because a report at seal still has to see everything a peek
+	// mid-gap already showed.
+	if again := r.Peek(); !reflect.DeepEqual(again, want) {
+		t.Errorf("second Peek() = %v, want %v", again, want)
+	}
+}
+
+func TestPeekOnAReaderThatHasSeenNothing(t *testing.T) {
+	if got := newLogReader().Peek(); len(got) != 0 {
+		t.Errorf("Peek() on a fresh reader = %v, want empty", got)
 	}
 }
 

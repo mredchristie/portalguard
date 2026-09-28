@@ -3,9 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"portalguard/internal/firewall"
@@ -92,7 +96,19 @@ func runStatus(ctx context.Context, args []string) int {
 	fmt.Printf("backend  : %s\n", st.Backend)
 	fmt.Printf("available: %t\n", st.Available)
 	fmt.Printf("phase    : %s\n", st.Phase)
+	// Only as root: without it pf cannot be read, and "can't tell" must not
+	// print as "yes".
+	if st.Phase != firewall.PhaseOff && st.Available {
+		if e, ok := fw.(firewall.Enforcer); ok {
+			if ok, why := e.Enforced(ctx); ok {
+				fmt.Println("enforced : yes")
+			} else {
+				fmt.Printf("enforced : NO - %s\n", why)
+			}
+		}
+	}
 	fmt.Printf("managed  : %t\n", st.Managed)
+	fmt.Printf("session  : %s\n", sessionLine(st))
 	for _, h := range st.Allowed {
 		fmt.Printf("allowed  : %s\n", h)
 	}
@@ -142,6 +158,11 @@ func runLockdown(ctx context.Context, args []string) int {
 	if err := fw.Lockdown(ctx); err != nil {
 		return fail(hint(err))
 	}
+	if e, ok := fw.(firewall.Enforcer); ok {
+		if ok, why := e.Enforced(ctx); !ok {
+			return fail(fmt.Errorf("the lockdown loaded but is not being applied: %s", why))
+		}
+	}
 	logf("all traffic blocked. run `sudo %s release` to undo", invokedAs())
 	return exitOK
 }
@@ -155,8 +176,29 @@ func runSeal(ctx context.Context, args []string) int {
 	if err := fw.Seal(ctx); err != nil {
 		return fail(hint(err))
 	}
-	logf("gap closed; traffic is still blocked. bring up your VPN, then `sudo %s release`", invokedAs())
+	// Record the seal. The ruleset after a seal is byte-for-byte the ruleset
+	// of a bare lockdown, so this is the one distinction the kernel genuinely
+	// cannot make for us, and the next invocation would otherwise offer to
+	// widen a gap that is already closed.
+	recordSeal()
+	logf("gap closed; traffic is still blocked. run `sudo %s handoff`, then connect your VPN", invokedAs())
 	return exitOK
+}
+
+// recordSeal rewrites the session file to say the gap is sealed, keeping
+// whatever the earlier invocation knew about the portal.
+func recordSeal() {
+	snap, err := state.LoadSnapshot(state.SessionPath)
+	if err != nil {
+		// No session file, so there is nothing to correct. The next
+		// invocation will read LOCKED_DOWN from the kernel, which is the safe
+		// reading of a sealed machine: it will not offer to widen a gap.
+		return
+	}
+	snap.State = state.Sealed
+	if err := state.SaveSnapshot(state.SessionPath, snap); err != nil {
+		logf("sealed, but could not update the session file: %v", err)
+	}
 }
 
 // runRelease is the escape hatch. It must work in every situation, so it does
@@ -171,6 +213,10 @@ func runRelease(ctx context.Context, args []string) int {
 		fmt.Fprintln(os.Stderr, "portalguard: fall back to `sudo pfctl -a portalguard -F all`")
 		return exitError
 	}
+	// The rules are gone, so the session file describes nothing. Resume would
+	// discard it anyway on reading PhaseOff from the kernel; removing it here
+	// just keeps `status` honest in the meantime.
+	state.ClearSnapshot(state.SessionPath)
 	logf("rules released; normal networking restored")
 	return exitOK
 }
@@ -180,10 +226,22 @@ func runRelease(ctx context.Context, args []string) int {
 func runAllow(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("allow", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprint(os.Stderr, `usage: portalguard allow [host]
+		fmt.Fprint(os.Stderr, `usage: portalguard allow [host[:port] ...]
 
-With no host, detects the portal and opens the gap for it. With a host,
-widens an already-open gap to include that host as well.
+With no host, detects the portal and opens the gap for it.
+
+With one or more hosts, widens a gap that is already open - including one
+opened by a `+"`portalguard run`"+` still waiting in another terminal. Portals
+routinely span several hostnames (a CDN for their stylesheets, a separate
+host for the login POST), and a blocked one usually shows up as a blank
+page rather than as an error.
+
+  sudo portalguard allow cdn.example.net
+  sudo portalguard allow cdn.example.net reg.example.net info.example.net:442
+
+A bare host opens 80 and 443. Give host:port to open one specific port
+instead; note that pf holds one port set for the whole gap, so a port
+opened for one host is open for every host in it.
 
 flags:
 `)
@@ -209,17 +267,17 @@ flags:
 	}
 
 	fw := backend.New()
+
+	if fs.NArg() > 0 {
+		return extendGap(ctx, fw, prober, fs.Args())
+	}
+
 	safety := firewall.InstallSafetyNet(fw, logf)
 	defer safety.Stop()
 
 	sess := state.NewSession(fw, prober, logf)
-
-	if fs.NArg() > 0 {
-		if err := sess.AllowExtra(ctx, fs.Arg(0)); err != nil {
-			return fail(hint(err))
-		}
-		return exitOK
-	}
+	sess.PersistTo(state.SessionPath)
+	sess.UseKnownNetworks(state.KnownNetworksPath)
 
 	res, err := sess.Detect(ctx)
 	if err != nil {
@@ -235,8 +293,200 @@ flags:
 	if err := sess.OpenGap(ctx); err != nil {
 		return fail(hint(err))
 	}
+	if opened := sess.OpenKnown(ctx); len(opened) > 0 {
+		fmt.Printf("gap widened automatically (known network, TLS verified): %s\n", strings.Join(opened, ", "))
+	}
 	fmt.Printf("gap open. log in yourself at: %s\n", res.PortalURL)
 	return exitOK
+}
+
+// ==== remembering a network ================================================
+
+func runRemember(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("remember", flag.ContinueOnError)
+	fs.Usage = func() {
+		fmt.Fprint(os.Stderr, `usage: portalguard remember
+
+Saves whatever is currently open beyond the portal's own host - the hosts a
+previous `+"`allow`"+` widened the gap with - as a known network, so the next visit
+to a site sharing this portal's domain can try opening them automatically.
+
+Nothing is trusted blindly on a later visit: OpenKnown still requires each
+remembered host to complete a fresh TLS handshake with a certificate valid
+for its name before it is opened. remember only shortens the list of hosts a
+human has to diagnose and name by hand; it does not change what Portalguard
+is willing to open without one. See docs/gap-scope.md, option E.
+
+Requires an open gap with something extra already allowed:
+
+  sudo portalguard allow
+  sudo portalguard allow cdn.example.net reg.example.net
+  sudo portalguard remember
+`)
+		fs.PrintDefaults()
+	}
+	build := proberFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return exitUsageError
+	}
+	if err := requireRoot("remember"); err != nil {
+		return fail(err)
+	}
+
+	prober, err := build()
+	if err != nil {
+		return fail(err)
+	}
+
+	sess, err := state.Resume(ctx, backend.New(), prober, logf, state.SessionPath)
+	if err != nil {
+		return fail(err)
+	}
+
+	site, added, err := sess.Remember(state.KnownNetworksPath)
+	if err != nil {
+		return fail(err)
+	}
+	if len(added) == 0 {
+		fmt.Printf("nothing new to remember for %s\n", site)
+		return exitOK
+	}
+	fmt.Printf("remembered for %s: %s\n", site, strings.Join(added, ", "))
+	fmt.Println("A later visit to a portal on this domain will try these automatically, once each one verifies.")
+	return exitOK
+}
+
+// ==== widening a gap somebody else opened =================================
+// The one command that acts on a firewall this process did not engage.
+
+// extendGap adds hosts to a gap that is already open, which is usually a gap
+// this process did not open: the common case is a `portalguard run` still
+// waiting in another terminal while the user works out that the login page is
+// blank because its stylesheets are blocked.
+//
+// Deliberately no safety net. Everywhere else, the process that engaged the
+// firewall releases it on the way out, which is the fail-safe the whole design
+// rests on. Here the firewall belongs to somebody else, and a Ctrl-C between
+// two hostnames must not tear down a lockdown this process never installed and
+// cannot put back. Widening is additive and leaves nothing to unwind, so
+// exiting without touching anything is the correct failure.
+func extendGap(ctx context.Context, fw firewall.Backend, prober *portal.Prober, args []string) int {
+	targets := make([]allowTarget, 0, len(args))
+	for _, arg := range args {
+		t, err := parseAllowTarget(arg)
+		if err != nil {
+			return fail(err)
+		}
+		targets = append(targets, t)
+	}
+
+	sess, err := state.Resume(ctx, fw, prober, logf, state.SessionPath)
+	if err != nil {
+		return fail(err)
+	}
+	// Record what this process adds. The kernel keeps the addresses but not
+	// the names, so without this the hostnames typed here were gone the
+	// moment it exited - and a `remember` after it saved the kernel's
+	// placeholder, "portal", instead of the hosts that were actually opened.
+	sess.PersistTo(state.SessionPath)
+
+	for _, t := range targets {
+		if err := sess.AllowExtra(ctx, t.host, t.ports...); err != nil {
+			return fail(hint(extendHint(err)))
+		}
+		fmt.Printf("gap widened: %s\n", t)
+	}
+	return exitOK
+}
+
+// allowTarget is one host the user asked to let through, with the ports they
+// asked for.
+type allowTarget struct {
+	host  string
+	ports []int
+}
+
+func (t allowTarget) String() string {
+	if len(t.ports) == 0 {
+		return t.host + " (ports 80, 443)"
+	}
+	return fmt.Sprintf("%s (port %d)", t.host, t.ports[0])
+}
+
+// parseAllowTarget reads a `host` or `host:port` argument.
+func parseAllowTarget(arg string) (allowTarget, error) {
+	host, port, err := net.SplitHostPort(arg)
+	if err != nil {
+		// Not a host:port pair. A bare IPv6 literal ("fe80::1") lands here
+		// too, which is the right answer: it is a host, not a host and a port.
+		return allowTarget{host: arg}, nil
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return allowTarget{}, fmt.Errorf("bad port in %q: want host or host:port, with the port in 1-65535", arg)
+	}
+	return allowTarget{host: host, ports: []int{n}}, nil
+}
+
+// extendHint turns the state machine's refusal into something a user standing
+// in front of a blank login page can act on.
+func extendHint(err error) error {
+	var bad *state.InvalidTransitionError
+	if !errors.As(err, &bad) || bad.Event != state.EventExtendGap {
+		return err
+	}
+	switch bad.From {
+	case state.Idle:
+		return fmt.Errorf(`there is no open gap to widen: no portalguard rules are loaded.
+
+Open one first, in this terminal or another:
+  sudo %s run`, invokedAs())
+	case state.LockedDown:
+		return fmt.Errorf(`traffic is blocked, but no gap is open, so there is nothing to widen.
+
+  sudo %s allow          # detect the portal and open the gap
+  sudo %s release        # or give the network back`, invokedAs(), invokedAs())
+	case state.Sealed, state.Authenticated:
+		return fmt.Errorf(`the gap has already been closed (%s), so it cannot be widened.
+
+If the login did not actually finish, start again:
+  sudo %s release
+  sudo %s run`, bad.From, invokedAs(), invokedAs())
+	default:
+		return err
+	}
+}
+
+// sessionLine renders the part of the status the packet filter cannot answer:
+// which state the machine had reached, and who left it there.
+//
+// It reports the *reconciled* state, not whatever the file claims, so what
+// status shows is exactly what the next `allow` or `seal` would act on. A file
+// saying GAP_OPEN over a ruleset that permits nothing must not be rendered as
+// an open gap: that mismatch is the thing a user reads status to rule out.
+func sessionLine(st firewall.Status) string {
+	if !st.Available {
+		return "unknown (the session file and the live ruleset both need root)"
+	}
+
+	snap, err := state.LoadSnapshot(state.SessionPath)
+	if err != nil {
+		if st.Phase == firewall.PhaseOff {
+			return "none"
+		}
+		adopted, _ := state.AdoptedState(st, state.Snapshot{})
+		return fmt.Sprintf("%s, recovered from the loaded ruleset alone (no session file)", adopted)
+	}
+
+	adopted, _ := state.AdoptedState(st, snap)
+	line := fmt.Sprintf("%s (pid %d, since %s)", adopted, snap.PID, snap.Since.Format(time.RFC3339))
+	if adopted != snap.State {
+		// Say so out loud. The two disagreeing means either a release this
+		// file knew nothing about, or a process that died mid-session, and
+		// both are worth seeing rather than quietly resolving.
+		line += fmt.Sprintf("\n           the session file says %s; the loaded ruleset says otherwise, and wins", snap.State)
+	}
+	return line
 }
 
 // runFlow drives the whole sequence and blocks until the user has logged in.
@@ -278,8 +528,16 @@ func printReport(sess *state.Session, redact, verbose bool, auditLog string) {
 		return
 	}
 	if rep.Empty() {
-		fmt.Println("\nNo traffic was accounted for. That usually means the counters could not")
-		fmt.Println("be read, not that nothing happened.")
+		// Two very different things look identical here, and the older
+		// wording asserted the worse one without checking. Ask the report
+		// which it was.
+		if rep.CountersUnavailable() {
+			fmt.Println("\nNo traffic was accounted for, because the counters could not be read.")
+			fmt.Println("That is a missing measurement, not a clean result.")
+		} else {
+			fmt.Println("\nThe counters were read and every one of them was zero: nothing was")
+			fmt.Println("blocked, and nothing went through the gap, while portalguard was engaged.")
+		}
 		return
 	}
 	if auditLog != "" {
@@ -298,6 +556,25 @@ func printReport(sess *state.Session, redact, verbose bool, auditLog string) {
 	}
 }
 
+// ==== telling the user what is missing ====================================
+// The gap stays the user's decision. This is the evidence for it.
+
+// printSuggestion prints the hosts the portal is asking for and not reaching,
+// with the command that would let them through.
+//
+// Worded as what was observed, not as what is wrong: these are names that
+// were looked up and are not in the gap, which is a fact. Whether the login
+// page needs them is something only the person looking at the page knows -
+// plenty of portals resolve a host they never load.
+func printSuggestion(names []string) {
+	if len(names) == 0 {
+		return
+	}
+	fmt.Printf("\n  Looked up but not open: %s\n", strings.Join(names, ", "))
+	fmt.Println("  If the login page is blank or broken, these are what to open:")
+	fmt.Printf("    sudo %s allow %s\n\n", invokedAs(), strings.Join(names, " "))
+}
+
 // ==== the whole flow ======================================================
 // detect, lock down, open the gap, wait for you to log in, seal.
 
@@ -307,7 +584,9 @@ func runFlow(ctx context.Context, args []string) int {
 		fmt.Fprint(os.Stderr, `usage: portalguard run [flags]
 
 Detects the portal, blocks everything, opens a gap for the login page only,
-waits for you to log in yourself, then seals back up ready for your VPN.
+waits for you to log in yourself, seals back up, then hands over to your VPN:
+only the VPN's connection may leave until its tunnel is up, and then
+portalguard steps aside.
 
 portalguard never enters credentials or accepts terms on your behalf.
 
@@ -321,6 +600,10 @@ flags:
 	allowVPN := vpnFlag(fs)
 	redact := fs.Bool("redact", false, "generalise hostnames in the leak report to categories, for output you plan to share")
 	verbose := fs.Bool("verbose", false, "if process attribution backs off, print why (diagnostic; not shown by default)")
+	var vpns endpointFlags
+	fs.Var(&vpns, "vpn", vpnFlagHelp)
+	noHandoff := fs.Bool("no-handoff", false, "stop at SEALED instead of handing over to your VPN")
+	handoffWait := fs.Duration("handoff-wait", 3*time.Minute, "how long to wait for the VPN tunnel after sealing")
 	auditLog := fs.String("audit-log", "", "write the full, unredacted report to this file (never to stdout) - for verifying a -redact run against ground truth without displaying it")
 	if err := fs.Parse(args); err != nil {
 		return exitUsageError
@@ -350,6 +633,10 @@ flags:
 
 	sess := state.NewSession(fw, prober, logf)
 	sess.Machine().Observe(func(t state.Transition) { logf("%s", t) })
+	// Record every move, so `allow` from a second terminal can widen the gap
+	// this run is about to open while this one sits waiting for the login.
+	sess.PersistTo(state.SessionPath)
+	sess.UseKnownNetworks(state.KnownNetworksPath)
 
 	err = firewall.Guard(fw, logf, func() error {
 		res, err := sess.Detect(ctx)
@@ -370,16 +657,49 @@ flags:
 			_ = sess.Release(ctx)
 			return err
 		}
+		// Only for hosts this site has been seen and verified on before -
+		// each one still has to complete a fresh TLS handshake before it is
+		// opened. See docs/gap-scope.md, option E.
+		if opened := sess.OpenKnown(ctx); len(opened) > 0 {
+			fmt.Printf("Opened automatically (known network, TLS verified): %s\n", strings.Join(opened, ", "))
+		}
 
 		fmt.Printf("\nOpen this page and log in yourself:\n  %s\n\n", res.PortalURL)
 		fmt.Println("Everything else on this machine is blocked while you do.")
+		if err := openBrowser(res.PortalURL); err != nil {
+			logf("could not open a browser automatically: %v", err)
+		}
 		fmt.Printf("Waiting up to %s for the login to go through...\n", *wait)
+
+		// A portal host that is missing from the gap usually shows up as a
+		// blank page rather than as an error, so say what is being looked
+		// for and not reached while the gap is still open and the user can
+		// still act on it. This opens nothing: it prints the command, and
+		// the person decides whether to run it.
+		sess.OnSuggestion(func(names []string) { printSuggestion(names) })
 
 		waitCtx, cancel := context.WithTimeout(ctx, *wait)
 		defer cancel()
 		if err := sess.WaitForAuth(waitCtx, *poll); err != nil {
 			_ = sess.Release(ctx)
+			var ne *state.NotEnforcedError
+			if errors.As(err, &ne) {
+				return fmt.Errorf("stopped: %v.\n"+
+					"  something else took over the firewall while you were logging in, so this\n"+
+					"  machine was no longer locked down. portalguard has cleared its rules", ne)
+			}
 			return fmt.Errorf("gave up waiting for the portal login: %w", err)
+		}
+
+		// Named VPN servers are resolved now, while the gap still lets DNS
+		// through. After the seal there is no DNS to ask.
+		var endpoints []firewall.Endpoint
+		if !*noHandoff {
+			endpoints, err = vpns.endpoints(state.SystemResolve(ctx))
+			if err != nil {
+				logf("%v; handing over on the default VPN ports instead", err)
+				endpoints = state.DefaultVPNEndpoints()
+			}
 		}
 
 		if err := sess.Seal(ctx); err != nil {
@@ -389,8 +709,11 @@ flags:
 
 		printReport(sess, *redact, *verbose, *auditLog)
 
-		fmt.Printf("Bring up your VPN now, then run: sudo %s release\n", invokedAs())
-		return nil
+		if *noHandoff {
+			fmt.Printf("When you are ready: sudo %s handoff, then connect your VPN.\n", invokedAs())
+			return nil
+		}
+		return handOff(ctx, sess, endpoints, *handoffWait)
 	})
 	if err != nil {
 		return fail(hint(err))

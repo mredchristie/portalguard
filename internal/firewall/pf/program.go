@@ -39,8 +39,10 @@ func (b *Backend) Lockdown(ctx context.Context) error {
 	b.phase = firewall.PhaseLocked
 	b.allowed = nil
 	b.since = time.Now()
-	// A fresh engagement gets a fresh account.
+	// A fresh engagement gets a fresh account, on disk as well as in memory.
 	b.counters = tally{}
+	b.counterNoteMade = false
+	clearTally()
 	b.gapOpened = time.Time{}
 	b.gapClosed = time.Time{}
 	b.resolvers = nil
@@ -203,7 +205,7 @@ func (b *Backend) stopReaderLocked() {
 // because it could not enumerate what it is closing.
 func (b *Backend) openAddrsLocked(ctx context.Context) []net.IP {
 	var out []net.IP
-	for _, table := range []string{portalTable, dnsTable} {
+	for _, table := range []string{portalTable, dnsTable, checkTable} {
 		out = append(out, b.tableAddrs(ctx, table)...)
 	}
 	return out

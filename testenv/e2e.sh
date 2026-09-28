@@ -201,10 +201,10 @@ if [ "$REDACT" = "1" ]; then
     AUDIT_B=$(mktemp -t portalguard-e2e-audit-b)
     printf '   $ %s run -probes-file %s -wait %ss -redact -audit-log <not printed> &   (output -> %s)\n' \
         "$BIN" "$PROBES" "$WAIT" "$RUN_LOG"
-    "$BIN" run -probes-file "$PROBES" -wait "${WAIT}s" -poll 2s -redact -audit-log "$AUDIT_B" >"$RUN_LOG" 2>&1 &
+    "$BIN" run -no-handoff -probes-file "$PROBES" -wait "${WAIT}s" -poll 2s -redact -audit-log "$AUDIT_B" >"$RUN_LOG" 2>&1 &
 else
     printf '   $ %s run -probes-file %s -wait %ss &   (output -> %s)\n' "$BIN" "$PROBES" "$WAIT" "$RUN_LOG"
-    "$BIN" run -probes-file "$PROBES" -wait "${WAIT}s" -poll 2s >"$RUN_LOG" 2>&1 &
+    "$BIN" run -no-handoff -probes-file "$PROBES" -wait "${WAIT}s" -poll 2s >"$RUN_LOG" 2>&1 &
 fi
 run_pid=$!
 
@@ -261,7 +261,7 @@ table_empty pg_dns                  "pg_dns emptied by the seal"
 # as open when no pass rule permits it.
 phase=$("$BIN" status --json 2>/dev/null | sed -n 's/.*"phase"[^"]*"\([^"]*\)".*/\1/p')
 if [ "$phase" = "GAP" ]; then
-    bad "status reports GAP after seal -- nothing is permitted at this point"
+    bad "status reports GAP after seal; nothing is permitted at this point"
 else
     pass "status reports $phase after seal, not GAP"
 fi
@@ -390,7 +390,7 @@ RUN_LOG2=$(mktemp -t portalguard-e2e-redact)
 AUDIT_D=$(mktemp -t portalguard-e2e-audit-d)
 printf '   $ %s run -probes-file %s -wait %ss -redact -audit-log <not printed> &   (output -> %s)\n' \
     "$BIN" "$PROBES" "$WAIT" "$RUN_LOG2"
-"$BIN" run -probes-file "$PROBES" -wait "${WAIT}s" -poll 2s -redact -audit-log "$AUDIT_D" >"$RUN_LOG2" 2>&1 &
+"$BIN" run -no-handoff -probes-file "$PROBES" -wait "${WAIT}s" -poll 2s -redact -audit-log "$AUDIT_D" >"$RUN_LOG2" 2>&1 &
 run_pid=$!
 
 printf '   waiting for GAP_OPEN'

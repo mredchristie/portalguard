@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -37,17 +38,258 @@ type Session struct {
 	mu      sync.Mutex
 	last    portal.Result
 	allowed []firewall.Host
+	// store is where a snapshot is written after every transition, or "" for
+	// a session that leaves nothing behind. See PersistTo.
+	store string
+	since time.Time
+	// knownPath is where OpenKnown looks for remembered networks, or "" to
+	// try none. See UseKnownNetworks.
+	knownPath string
+
+	// onSuggest is told about portal hosts that are being looked up and are
+	// not in the gap; suggested remembers which have been passed on already,
+	// so a three-second poll does not repeat itself. See OnSuggestion.
+	onSuggest func([]string)
+	suggested map[string]bool
 }
 
 // NewSession wires a session. A nil prober gets the default probe list.
 func NewSession(fw firewall.Backend, prober *portal.Prober, logf firewall.Logf) *Session {
+	return newSession(NewMachine(), fw, prober, logf)
+}
+
+func newSession(m *Machine, fw firewall.Backend, prober *portal.Prober, logf firewall.Logf) *Session {
 	if prober == nil {
 		prober = portal.NewProber()
 	}
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
-	return &Session{machine: NewMachine(), fw: fw, prober: prober, logf: logf}
+	s := &Session{machine: m, fw: fw, prober: prober, logf: logf, since: time.Now()}
+	// Recording on every transition rather than at chosen call sites: the
+	// snapshot is only useful if it is never stale, and "remember to save
+	// here" is exactly the kind of thing a new command forgets.
+	m.Observe(func(Transition) { s.save() })
+	return s
+}
+
+// ==== leaving something behind ============================================
+// One invocation records what the next one cannot work out for itself.
+
+// PersistTo makes the session record a snapshot at path after every
+// transition, so a later invocation can pick up where this one left off.
+//
+// A session with no store is the default, and is what tests and any read-only
+// caller want: nothing is written, and nothing has to be cleaned up.
+func (s *Session) PersistTo(path string) {
+	s.mu.Lock()
+	s.store = path
+	s.mu.Unlock()
+	s.save()
+}
+
+// save writes the current snapshot, if this session has a store.
+//
+// Failures are logged and swallowed, for the same reason the pf enable token
+// is written best-effort: refusing to lock the machine down because a
+// bookkeeping file would not write is the tail wagging the dog. What is lost
+// is the host *names* and the portal identity; the gap itself is recovered
+// from the kernel either way.
+func (s *Session) save() {
+	s.mu.Lock()
+	path := s.store
+	snap := s.snapshotLocked()
+	s.mu.Unlock()
+
+	if path == "" {
+		return
+	}
+	if err := SaveSnapshot(path, snap); err != nil {
+		s.logf("could not record the session for the next invocation: %v", err)
+	}
+}
+
+// snapshotLocked builds the on-disk view of this session. The caller must hold
+// s.mu.
+func (s *Session) snapshotLocked() Snapshot {
+	return Snapshot{
+		State: s.machine.State(),
+		Portal: PortalRef{
+			URL:   s.last.PortalURL,
+			Host:  s.last.PortalHost,
+			Port:  s.last.PortalPort,
+			Addrs: s.last.PortalAddrs,
+		},
+		Allowed: append([]firewall.Host(nil), s.allowed...),
+		Since:   s.since,
+		History: s.machine.History(),
+	}
+}
+
+// Snapshot returns what this session would record, whether or not it has a
+// store. It is what `status` renders and what a long-running UI would poll.
+func (s *Session) Snapshot() Snapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.snapshotLocked()
+}
+
+// ==== picking up where another process left off ===========================
+// The kernel decides the phase; the snapshot only supplies the names.
+
+// Resume builds a session that adopts whatever an earlier invocation left in
+// place, so `allow`, `seal` and `status` work as separate commands rather than
+// only inside a single `run`.
+//
+// The ordering here is the whole safety argument: **the kernel decides the
+// phase, and the snapshot only enriches it.** A snapshot is a file written by
+// a process that may since have died, been killed, or been followed by a
+// `release` it knew nothing about. Letting it decide would mean a stale file
+// could convince this process that a gap is open when the machine is in fact
+// wide open, or fully blocked. Reading the loaded ruleset first means the
+// worst a stale snapshot can do is be ignored - which is also why nothing has
+// to guarantee the file gets cleaned up.
+//
+// What the snapshot adds is the part no packet filter can hold: which state
+// the machine had reached (a bare lockdown and a sealed gap are the same
+// ruleset), and the hostnames and reasons behind the addresses in the tables.
+func Resume(ctx context.Context, fw firewall.Backend, prober *portal.Prober, logf firewall.Logf, path string) (*Session, error) {
+	st, err := fw.Status(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("read firewall status: %w", err)
+	}
+
+	snap, snapErr := LoadSnapshot(path)
+	if snapErr != nil {
+		snap = Snapshot{}
+	}
+
+	adopted, note := AdoptedState(st, snap)
+	if adopted == Idle && !errors.Is(snapErr, ErrNoSnapshot) {
+		// Nothing of ours is loaded, so the snapshot describes a session that
+		// has already been released. Drop it rather than leave a file behind
+		// that says otherwise.
+		ClearSnapshot(path)
+		snap = Snapshot{}
+	}
+
+	m, err := NewMachineAt(adopted, note)
+	if err != nil {
+		return nil, err
+	}
+
+	s := newSession(m, fw, prober, logf)
+	s.mu.Lock()
+	s.allowed = reconcileAllowed(snap.Allowed, st.Allowed)
+	if adopted != Idle && snap.Portal.Host != "" {
+		// The portal identity comes from the earlier invocation's detection
+		// run, not from one of ours. Nothing here is re-probed: this process
+		// has not looked at the network, and says so by leaving Result's probe
+		// detail empty.
+		s.last = portal.Result{
+			Class:       portal.Portal,
+			PortalURL:   snap.Portal.URL,
+			PortalHost:  snap.Portal.Host,
+			PortalPort:  snap.Portal.Port,
+			PortalAddrs: snap.Portal.Addrs,
+		}
+	}
+	if !snap.Since.IsZero() {
+		s.since = snap.Since
+	}
+	s.mu.Unlock()
+	return s, nil
+}
+
+// AdoptedState reconciles the loaded ruleset with the snapshot, and says which
+// of the two decided.
+//
+// Exported so `status` can show exactly the state the next `allow` would act
+// on. Rendering the snapshot's own claim instead would let status report
+// GAP_OPEN over a ruleset that permits nothing, which is precisely the
+// mismatch a user reads status to rule out.
+//
+// The firewall phase is coarser than the machine: PhaseLocked covers both a
+// bare lockdown and a gap that has been sealed, and PhaseGap covers both a
+// user who is still logging in and one whose re-probe has already come back
+// clean. The snapshot is allowed to pick between the states that share a
+// phase, and nothing else.
+func AdoptedState(st firewall.Status, snap Snapshot) (State, string) {
+	switch st.Phase {
+	case firewall.PhaseGap:
+		if snap.State == Authenticated {
+			return snap.State, "resumed: the gap is open in the loaded ruleset, and the session file says the re-probe had already succeeded"
+		}
+		return GapOpen, resumeNote(snap, "the gap is open in the loaded ruleset")
+	case firewall.PhaseLocked:
+		if snap.State == Authenticated || snap.State == Sealed {
+			return snap.State, "resumed: traffic is blocked in the loaded ruleset, and the session file says " + string(snap.State)
+		}
+		return LockedDown, resumeNote(snap, "traffic is blocked in the loaded ruleset")
+	default:
+		return Idle, "no portalguard rules are loaded"
+	}
+}
+
+func resumeNote(snap Snapshot, kernel string) string {
+	if snap.State == "" {
+		return "resumed from the kernel alone: " + kernel + ", and there is no session file"
+	}
+	return "resumed: " + kernel
+}
+
+// reconcileAllowed merges what the snapshot remembers with what the packet
+// filter is actually enforcing.
+//
+// The kernel decides which addresses are open. The snapshot only supplies the
+// names, ports and reasons that a table of addresses cannot hold. So a
+// remembered host whose addresses are no longer open is dropped, and an open
+// address no remembered host accounts for is kept as it came back from the
+// kernel - because the one thing this must never do is leave something that is
+// genuinely open out of the picture.
+func reconcileAllowed(remembered, live []firewall.Host) []firewall.Host {
+	if len(live) == 0 {
+		return nil
+	}
+	open := map[string]bool{}
+	for _, h := range live {
+		for _, ip := range h.Addrs {
+			open[ip.String()] = true
+		}
+	}
+
+	var out []firewall.Host
+	accounted := map[string]bool{}
+	for _, h := range remembered {
+		var keep []net.IP
+		for _, ip := range h.Addrs {
+			if open[ip.String()] {
+				keep = append(keep, ip)
+				accounted[ip.String()] = true
+			}
+		}
+		if len(keep) == 0 {
+			continue
+		}
+		h.Addrs = keep
+		out = append(out, h)
+	}
+
+	for _, h := range live {
+		var unaccounted []net.IP
+		for _, ip := range h.Addrs {
+			if !accounted[ip.String()] {
+				unaccounted = append(unaccounted, ip)
+				accounted[ip.String()] = true
+			}
+		}
+		if len(unaccounted) == 0 {
+			continue
+		}
+		h.Addrs = unaccounted
+		out = append(out, h)
+	}
+	return out
 }
 
 // Machine exposes the state machine for observers and status output.
@@ -70,6 +312,9 @@ func (s *Session) Detect(ctx context.Context) (portal.Result, error) {
 	}
 
 	res := s.prober.Detect(ctx)
+	// Follow the portal's redirects now, while the network is open. Only
+	// here: the re-probe during the gap reuses Detect, and must not.
+	s.prober.FollowChain(ctx, &res)
 
 	s.mu.Lock()
 	s.last = res
@@ -167,6 +412,193 @@ func (s *Session) AllowExtra(ctx context.Context, host string, ports ...int) err
 	return err
 }
 
+// ==== known networks: open only what proves itself =========================
+//
+// The gap stays decided by a human for anything OpenGap or AllowExtra touch.
+// This is the one exception, and it earns it by substituting a stronger
+// proof than a person glancing at a hostname would give it: a valid TLS
+// certificate for the exact name, checked fresh on this network, on this
+// connection. See docs/gap-scope.md, option E, and verifyKnownHost for why
+// that stands in for consent here and DNS alone never could.
+
+// UseKnownNetworks makes OpenKnown consult the remembered-networks file at
+// path. A session with no known-networks path is the default, and OpenKnown
+// is then a no-op: nothing is tried that a human did not name.
+func (s *Session) UseKnownNetworks(path string) {
+	s.mu.Lock()
+	s.knownPath = path
+	s.mu.Unlock()
+}
+
+// OpenKnown tries to widen an already-open gap using hosts remembered for the
+// portal's site, opening only the ones that complete a TLS handshake with a
+// certificate valid for their name. It returns the hostnames actually opened.
+//
+// A host that fails verification - wrong certificate, self-signed, refused,
+// timed out - is not opened and is not treated as an error. It simply falls
+// back to the existing suggestion path: if the portal turns out to need it,
+// the leak reader will notice it being looked up and SuggestAllow will name
+// it, same as any host nobody has told Portalguard about.
+func (s *Session) OpenKnown(ctx context.Context) []string {
+	s.mu.Lock()
+	path := s.knownPath
+	portalHost := s.last.PortalHost
+	open := make(map[string]bool, len(s.allowed)+1)
+	open[normalizeHost(portalHost)] = true
+	for _, h := range s.allowed {
+		open[normalizeHost(h.Name)] = true
+	}
+	s.mu.Unlock()
+
+	if path == "" {
+		return nil
+	}
+	site := siteOf(portalHost)
+	if site == "" {
+		return nil
+	}
+	kn, ok := LoadKnownNetworks(path)[site]
+	if !ok {
+		return nil
+	}
+
+	var opened []string
+	for _, spec := range kn.Hosts {
+		host, port := splitHostPort(spec)
+		if open[normalizeHost(host)] {
+			continue
+		}
+
+		ports := []int{80, 443}
+		verifyPort := 443
+		if port != 0 {
+			ports, verifyPort = []int{port}, port
+		}
+
+		h, err := resolveHost(ctx, host, ports, "known network, verified by TLS certificate")
+		if err != nil {
+			s.logf("known host %s did not resolve: %v", host, err)
+			continue
+		}
+
+		var verifyErr error
+		verified := false
+		for _, addr := range h.Addrs {
+			if verifyErr = s.verifyThroughCheck(ctx, addr, verifyPort, host); verifyErr == nil {
+				verified = true
+				break
+			}
+		}
+		if !verified {
+			s.logf("known host %s did not verify (%v) - not opened automatically", host, verifyErr)
+			continue
+		}
+
+		if err := s.fw.AllowHost(ctx, h); err != nil {
+			s.logf("known host %s verified but could not be opened: %v", host, err)
+			continue
+		}
+		s.mu.Lock()
+		s.allowed = append(s.allowed, h)
+		s.mu.Unlock()
+		if _, err := s.machine.Apply(EventExtendGap, host+" (known network, TLS verified)"); err != nil {
+			s.logf("known host %s opened but could not record the transition: %v", host, err)
+		}
+		s.logf("gap opened automatically for %s (known network, TLS verified)", h)
+		opened = append(opened, host)
+	}
+	return opened
+}
+
+// Remember saves the gap's current extra hosts - the ones widened onto it
+// beyond the portal's own host - as a known network under the portal's site,
+// so OpenKnown can try them automatically on a later visit.
+//
+// It requires an open gap with something extra already allowed: it can only
+// remember hosts that were actually reached and, implicitly, judged
+// necessary by whoever ran `allow` on them - never hosts named blind. It does
+// not remember the portal host itself, which is re-detected and re-pinned
+// fresh on every visit regardless, and can legitimately vary by branch in a
+// way a chain's CDN and auth hosts do not.
+func (s *Session) Remember(path string) (site string, added []string, err error) {
+	s.mu.Lock()
+	portalHost := s.last.PortalHost
+	extra := make([]firewall.Host, 0, len(s.allowed))
+	nameless := 0
+	for _, h := range s.allowed {
+		if h.AllowDNSTo || h.Check || normalizeHost(h.Name) == normalizeHost(portalHost) {
+			continue
+		}
+		// A host recovered from the kernel alone carries a table's label,
+		// not a hostname. Remembering it would save a word, not a host.
+		if !rememberable(h.Name) {
+			nameless++
+			continue
+		}
+		extra = append(extra, h)
+	}
+	s.mu.Unlock()
+
+	site = siteOf(portalHost)
+	if site == "" {
+		return "", nil, fmt.Errorf("no portal host to remember a network for")
+	}
+	if len(extra) == 0 && nameless > 0 {
+		return site, nil, fmt.Errorf("hosts are open beyond the portal, but their names were not recorded when they were added; run allow for them again, then remember")
+	}
+	if len(extra) == 0 {
+		return site, nil, fmt.Errorf("nothing extra is open to remember; allow a host first")
+	}
+
+	networks := LoadKnownNetworks(path)
+	kn, existed := networks[site]
+	if !existed {
+		kn = KnownNetwork{Site: site, AddedAt: time.Now()}
+	}
+	have := map[string]bool{}
+	for _, spec := range kn.Hosts {
+		h, _ := splitHostPort(spec)
+		have[normalizeHost(h)] = true
+	}
+	for _, h := range extra {
+		if have[normalizeHost(h.Name)] {
+			continue
+		}
+		spec := h.Name
+		if len(h.Ports) == 1 && h.Ports[0] != 80 && h.Ports[0] != 443 {
+			spec = fmt.Sprintf("%s:%d", h.Name, h.Ports[0])
+		}
+		kn.Hosts = append(kn.Hosts, spec)
+		have[normalizeHost(h.Name)] = true
+		added = append(added, h.Name)
+	}
+	if len(added) == 0 {
+		return site, nil, nil
+	}
+	kn.LastSeen = time.Now()
+	networks[site] = kn
+
+	if err := SaveKnownNetworks(path, networks); err != nil {
+		return site, nil, err
+	}
+	return site, added, nil
+}
+
+// splitHostPort reads a "host" or "host:port" entry, the same form `allow`
+// accepts on the command line. port is 0 when none was given, meaning the
+// default 80/443.
+func splitHostPort(spec string) (host string, port int) {
+	h, p, err := net.SplitHostPort(spec)
+	if err != nil {
+		return spec, 0
+	}
+	n, err := strconv.Atoi(p)
+	if err != nil || n < 1 || n > 65535 {
+		return spec, 0
+	}
+	return h, n
+}
+
 // CheckAuth re-probes through the open gap. A success means the portal has let
 // the user on, which is the only signal we trust: we never read the portal's
 // own "you are logged in" page.
@@ -195,6 +627,13 @@ func (s *Session) WaitForAuth(ctx context.Context, every time.Duration) error {
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
+		// A login wait over a lockdown that is no longer applied is a wait
+		// over an open machine. Stop and say so rather than carry on
+		// reporting a gap that is now the whole network.
+		if ok, why := s.enforced(ctx); !ok {
+			return &NotEnforcedError{Why: why}
+		}
+		s.openProbeChecks(ctx)
 		ok, err := s.CheckAuth(ctx)
 		if err != nil {
 			return err
@@ -202,11 +641,65 @@ func (s *Session) WaitForAuth(ctx context.Context, every time.Duration) error {
 		if ok {
 			return nil
 		}
+		// The wait is the whole reason this is worth doing here: it is the
+		// only stretch where the gap is open, the user is looking at the
+		// portal, and a missing host can still be added.
+		s.suggest()
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-t.C:
 		}
+	}
+}
+
+// OnSuggestion registers a callback for portal hosts that are being looked up
+// and are not in the gap - the ones a blank login page is quietly waiting on.
+// It fires from WaitForAuth.
+//
+// It fires only when a name appears that has not been passed on before, so a
+// poll every three seconds does not turn into the same advice printed two
+// hundred times. What it passes is the whole current list rather than only
+// the new part, because the point of the list is a command the user can run
+// as it stands, and a command that omits the host mentioned a minute ago
+// would open the wrong set.
+func (s *Session) OnSuggestion(f func(names []string)) {
+	s.mu.Lock()
+	s.onSuggest = f
+	s.mu.Unlock()
+}
+
+// suggest passes the current suggestions on, if anything in them is new.
+func (s *Session) suggest() {
+	s.mu.Lock()
+	f := s.onSuggest
+	s.mu.Unlock()
+	if f == nil {
+		return
+	}
+
+	// Computed outside the lock: SuggestAllow takes s.mu itself, and reads
+	// the session file.
+	names := s.SuggestAllow()
+	if len(names) == 0 {
+		return
+	}
+
+	s.mu.Lock()
+	fresh := false
+	if s.suggested == nil {
+		s.suggested = map[string]bool{}
+	}
+	for _, n := range names {
+		if !s.suggested[n] {
+			s.suggested[n] = true
+			fresh = true
+		}
+	}
+	s.mu.Unlock()
+
+	if fresh {
+		f(names)
 	}
 }
 
@@ -240,23 +733,6 @@ func (s *Session) Report() (firewall.Report, bool) {
 		return firewall.Report{}, false
 	}
 	return r.LeakReport(), true
-}
-
-// HandOff releases our rules so the user's VPN owns the connection.
-//
-// v0.1 does not start or verify the VPN: the user does that, and this call
-// records the handover and gets our rules out of the way. Verifying that the
-// tunnel is actually up before releasing is the obvious next step and is what
-// makes the handover leak-free rather than merely brief.
-func (s *Session) HandOff(ctx context.Context) error {
-	if !s.machine.Can(EventHandOff) {
-		return &InvalidTransitionError{From: s.machine.State(), Event: EventHandOff}
-	}
-	if err := s.fw.Release(ctx); err != nil {
-		return fmt.Errorf("hand off: %w", err)
-	}
-	_, err := s.machine.Apply(EventHandOff, "rules released to the VPN")
-	return err
 }
 
 // Release tears everything down and returns to Idle. It is legal from any
@@ -299,6 +775,23 @@ func gapHosts(res portal.Result) ([]firewall.Host, error) {
 		Ports:  ports,
 		Reason: "captive portal login page",
 	}}
+
+	// Every host the portal redirected through on the way to its login page,
+	// pinned at detection like the portal host itself.
+	for _, hop := range res.Hops {
+		ports := []int{80, 443}
+		if hop.Port != 80 && hop.Port != 443 {
+			ports = append(ports, hop.Port)
+		}
+		if addrs := parseIPs(hop.Addrs); len(addrs) > 0 {
+			hosts = append(hosts, firewall.Host{
+				Name:   hop.Host,
+				Addrs:  addrs,
+				Ports:  ports,
+				Reason: "the portal redirected through it",
+			})
+		}
+	}
 
 	if dns := systemResolvers(); len(dns) > 0 {
 		hosts = append(hosts, firewall.Host{

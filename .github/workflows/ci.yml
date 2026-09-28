@@ -1,0 +1,35 @@
+# Unit tests on macOS, where the pf backend lives, and on Linux, where only
+# the platform-neutral packages build. Nothing here needs root or touches a
+# firewall: the pf tests drive a fake pfctl, and the one that uses the real
+# pfctl only asks it to parse (-n), which needs no privileges.
+#
+# What CI cannot run is the live half: `make e2e` and `make hotspot-demo`
+# load real rules and cut the network, so they stay manual. See
+# testenv/README.md.
+
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - name: vet
+        run: go vet ./...
+      - name: test
+        run: go test -race ./...
+      - name: build
+        run: go build ./cmd/portalguard

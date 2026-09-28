@@ -5,6 +5,7 @@ package pf
 import (
 	"context"
 	"net"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -21,14 +22,32 @@ type fakePfctl struct {
 	calls       []string
 	loaded      string // the anchor ruleset currently "in the kernel"
 	hookPresent bool
-	// counters is what `-s rules -v` reports for the loaded ruleset. Reset on
-	// every load, exactly as pf does.
-	counters string
-	tables   map[string][]string
+	// blockedOut and dns are the packet counts `-s rules -v` reports for the
+	// *currently loaded* ruleset. A load resets them to zero, exactly as pf
+	// does, and traffic() is how a test says packets arrived since then.
+	blockedOut int
+	dns        int
+	tables     map[string][]string
+	// countersFail makes `-s rules -v` error, standing in for the case where
+	// the counters genuinely could not be read.
+	countersFail bool
+	// stateDir stands in for /var/run: the files every invocation on this
+	// machine shares. One fake kernel is one machine, so every backend built
+	// against it sees the same bookkeeping, which is what lets a test model
+	// two processes properly.
+	stateDir string
 }
 
-func newFakePfctl() *fakePfctl {
-	return &fakePfctl{hookPresent: true, tables: map[string][]string{}}
+// traffic says that n packets were blocked and d went through the DNS hole
+// since the ruleset now loaded was loaded.
+func (f *fakePfctl) traffic(n, d int) {
+	f.blockedOut += n
+	f.dns += d
+}
+
+func newFakePfctl(t *testing.T) *fakePfctl {
+	t.Helper()
+	return &fakePfctl{hookPresent: true, tables: map[string][]string{}, stateDir: t.TempDir()}
 }
 
 // countersFor is a plausible statistics dump: one block rule with traffic, and
@@ -73,12 +92,25 @@ func (f *fakePfctl) run(_ context.Context, path string, stdin []byte, args ...st
 
 	case strings.Contains(joined, "-f -"):
 		f.loaded = string(stdin)
-		// A load resets pf's per-rule statistics.
-		f.counters = countersFor(f.loaded, 100, 12)
+		// A load resets pf's per-rule statistics, for every process on the
+		// machine and not only the one that loaded.
+		f.blockedOut, f.dns = 0, 0
+		// A table declaration carrying addresses *replaces* the table's
+		// contents. Modelling that is the point: it is what makes a second
+		// process rendering its ruleset from an empty allow-list destructive
+		// rather than merely incomplete.
+		f.loadTables(f.loaded)
+		return "", nil
+
+	case strings.Contains(joined, "-F Tables"):
+		f.tables = map[string][]string{}
 		return "", nil
 
 	case strings.Contains(joined, "-s rules -v"):
-		return f.counters, nil
+		if f.countersFail {
+			return "", errString("pfctl: DIOCGETRULES: Operation not supported")
+		}
+		return countersFor(f.loaded, f.blockedOut, f.dns), nil
 
 	case strings.Contains(joined, "-a portalguard -s rules"):
 		return f.loaded, nil
@@ -97,6 +129,23 @@ func (f *fakePfctl) run(_ context.Context, path string, stdin []byte, args ...st
 	return "", nil
 }
 
+// tableRe matches the table declarations render() emits.
+var tableRe = regexp.MustCompile(`(?m)^table <([a-z_]+)> persist(?: \{ ([^}]*) \})?`)
+
+// loadTables applies a ruleset's table declarations, the way pf does: a
+// declaration with a body replaces whatever the table held, and one without a
+// body leaves an empty table behind.
+func (f *fakePfctl) loadTables(rules string) {
+	for _, m := range tableRe.FindAllStringSubmatch(rules, -1) {
+		name, body := m[1], strings.TrimSpace(m[2])
+		if body == "" {
+			f.tables[name] = nil
+			continue
+		}
+		f.tables[name] = strings.Fields(body)
+	}
+}
+
 var errNoDevice = &net.OpError{Op: "ifconfig", Err: errString("device does not exist")}
 
 type errString string
@@ -105,11 +154,14 @@ func (e errString) Error() string { return string(e) }
 
 func newTestBackend(t *testing.T, f *fakePfctl) *Backend {
 	t.Helper()
-	// Redirect the enable-token file: /var/run is not writable by tests, and
-	// a test must never touch the real one.
-	orig := tokenPath
-	tokenPath = t.TempDir() + "/pf-token"
-	t.Cleanup(func() { tokenPath = orig })
+	// Redirect the files that live in /var/run: it is not writable by tests,
+	// and a test must never touch the real ones. They point into the fake
+	// kernel's own directory, so two backends built against one fake share
+	// them exactly as two invocations on one machine would.
+	origToken, origCounters := tokenPath, counterPath
+	tokenPath = f.stateDir + "/pf-token"
+	counterPath = f.stateDir + "/counters"
+	t.Cleanup(func() { tokenPath, counterPath = origToken, origCounters })
 
 	b := New()
 	b.exec = f.run
@@ -126,7 +178,7 @@ func newTestBackend(t *testing.T, f *fakePfctl) *Backend {
 // them. Reading the counters once at the end would report zero packets blocked
 // during lockdown, which is a comfortable and wrong answer.
 func TestCountersAccumulateAcrossTheRealSequence(t *testing.T) {
-	f := newFakePfctl()
+	f := newFakePfctl(t)
 	b := newTestBackend(t, f)
 	ctx := context.Background()
 
@@ -141,12 +193,18 @@ func TestCountersAccumulateAcrossTheRealSequence(t *testing.T) {
 	portalHost := firewall.Host{Name: "portal", Addrs: []net.IP{net.ParseIP("192.168.0.1")}}
 	dnsHost := firewall.Host{Name: "resolvers", Addrs: []net.IP{net.ParseIP("192.168.0.1")}, AllowDNSTo: true, Ports: []int{53}}
 
+	// 100 packets are blocked under each ruleset in turn. Each reload resets
+	// pf's counters, so the totals are only right if every reload banks the
+	// outgoing ruleset's numbers on the way past.
+	f.traffic(100, 0)
 	if err := b.AllowHost(ctx, portalHost); err != nil {
 		t.Fatalf("allow portal: %v", err)
 	}
+	f.traffic(100, 0)
 	if err := b.AllowHost(ctx, dnsHost); err != nil {
 		t.Fatalf("allow dns: %v", err)
 	}
+	f.traffic(100, 12)
 	if err := b.Seal(ctx); err != nil {
 		t.Fatalf("seal: %v", err)
 	}
@@ -177,7 +235,7 @@ func TestCountersAccumulateAcrossTheRealSequence(t *testing.T) {
 // Losing the leak log is bad; failing to open the gap over it would leave the
 // user unable to log in at all.
 func TestGapOpensEvenWhenTheLogDeviceCannotBeCreated(t *testing.T) {
-	f := newFakePfctl()
+	f := newFakePfctl(t)
 	b := newTestBackend(t, f)
 	ctx := context.Background()
 
@@ -197,7 +255,7 @@ func TestGapOpensEvenWhenTheLogDeviceCannotBeCreated(t *testing.T) {
 // TestLockdownRefusesWithoutTheAnchorHook guards the failure that would leave
 // portalguard reporting LOCKED_DOWN over a wide open network.
 func TestLockdownRefusesWithoutTheAnchorHook(t *testing.T) {
-	f := newFakePfctl()
+	f := newFakePfctl(t)
 	f.hookPresent = false
 	b := newTestBackend(t, f)
 
@@ -218,7 +276,7 @@ func TestLockdownRefusesWithoutTheAnchorHook(t *testing.T) {
 // TestSealEmptiesTheTables pins the fix for the residue bug: persist tables
 // outlive the ruleset that referenced them, so seal must flush them.
 func TestSealEmptiesTheTables(t *testing.T) {
-	f := newFakePfctl()
+	f := newFakePfctl(t)
 	b := newTestBackend(t, f)
 	ctx := context.Background()
 

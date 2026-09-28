@@ -99,7 +99,7 @@ func Guard(b Backend, logf Logf, fn func() error) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			if logf != nil {
-				logf("panic while firewall was engaged: %v -- releasing rules", r)
+				logf("panic while firewall was engaged: %v; releasing rules", r)
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), releaseTimeout)
 			defer cancel()

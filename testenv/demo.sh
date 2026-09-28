@@ -31,4 +31,4 @@ curl -s -o /dev/null "$PORTAL/reset"
 # shows the accept landing before that message does.
 ( sleep 8; curl -s -o /dev/null -X POST "$PORTAL/accept" ) &
 
-exec "$BIN" run -probes-file "$PROBES" -wait 60s -poll 2s -redact
+exec "$BIN" run -no-handoff -probes-file "$PROBES" -wait 60s -poll 2s -redact

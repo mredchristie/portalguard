@@ -4,7 +4,7 @@ BIN_DIR  := bin
 VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS  := -X main.version=$(VERSION)
 
-.PHONY: all build install test vet fmt clean detect rescue e2e e2e-redact demo testenv-up testenv-down testenv-logs
+.PHONY: all build install uninstall test vet fmt clean detect rescue e2e e2e-redact demo demo-allow testenv-up testenv-down testenv-logs hotspot-up hotspot-down hotspot-demo hotspot-known handoff-check
 
 all: vet test build
 
@@ -12,8 +12,18 @@ build:
 	@mkdir -p $(BIN_DIR)
 	go build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY) $(PKG)
 
-install:
-	go install -ldflags "$(LDFLAGS)" $(PKG)
+# Copies the built binary to /usr/local/bin so `portalguard` and
+# `sudo portalguard ...` work from anywhere, matching what the README shows.
+# /usr/local/bin is root-owned on a stock Mac, so this usually needs sudo.
+PREFIX ?= /usr/local
+
+install: build
+	install -d $(PREFIX)/bin
+	install -m 0755 $(BIN_DIR)/$(BINARY) $(PREFIX)/bin/$(BINARY)
+	@echo "installed to $(PREFIX)/bin/$(BINARY) - try: sudo portalguard lockdown"
+
+uninstall:
+	rm -f $(PREFIX)/bin/$(BINARY)
 
 test:
 	go test ./...
@@ -84,3 +94,42 @@ e2e-redact: build
 demo: build
 	@echo "this needs root and CUTS THE NETWORK several times on purpose."
 	sudo ./testenv/demo.sh
+
+# The two-process flow: `run` waiting while a separate `allow` widens the gap
+# under it, which is what a blank portal page actually needs. See
+# testenv/README.md, "Recording the two-process demo".
+demo-allow: build
+	@echo "this needs root and CUTS THE NETWORK several times on purpose."
+	sudo ./testenv/demo-allow.sh
+
+# --- The off-box hotspot (see testenv/README.md, "The off-box hotspot") ------
+# A BT-shaped portal across four containers, each on its own address on
+# bridge100, so pf genuinely filters it - unlike everything above, which runs
+# on loopback. Needs Apple's container tool: brew install container.
+# up and down run as you, not root: the container service is per-user.
+hotspot-up:
+	./testenv/hotspot.sh up
+
+hotspot-down:
+	./testenv/hotspot.sh down
+
+# First visit: blank page, suggestion, allow from a second process, remember,
+# login, seal. Points this Mac's DNS at the hotspot while it runs and puts it
+# back on exit. Disconnect the VPN first.
+hotspot-demo: build
+	@echo "this needs root, CUTS THE NETWORK, and points DNS at the hotspot while it runs."
+	sudo ./testenv/hotspot-demo.sh first
+
+# Next visit: the remembered hosts open themselves after a TLS check. Needs
+# hotspot-demo to have run first, and mkcert -install for the certificates.
+hotspot-known: build
+	@echo "this needs root, CUTS THE NETWORK, and points DNS at the hotspot while it runs."
+	sudo ./testenv/hotspot-demo.sh known
+
+# --- The VPN handover ----------------------------------------------------------
+# Proves the handover hole on the wire, with no VPN: during a handover a UDP
+# packet to 51820 leaves the machine and one to port 9 does not, and 51820 is
+# dropped again once the hole closes. Disconnect any VPN first.
+handoff-check: build
+	@echo "this needs root and CUTS THE NETWORK for about ten seconds."
+	sudo ./testenv/handoff-rules-check.sh

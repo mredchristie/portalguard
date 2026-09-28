@@ -28,6 +28,10 @@ const (
 	portalTable = "pg_portal"
 	// dnsTable holds the resolvers this network handed us.
 	dnsTable = "pg_dns"
+	// checkTable holds addresses Portalguard's own checks may reach: the
+	// post-login re-probe and the certificate check on a remembered host.
+	// Kept apart from portalTable so a check never widens the portal's ports.
+	checkTable = "pg_check"
 	// LogInterface is the pflog pseudo-device our rules log to. A dedicated
 	// device rather than the default pflog0, for the same reason the rules
 	// live in a dedicated anchor: nothing else on the system owns it, so
@@ -47,6 +51,11 @@ type gap struct {
 	portalAddrs []net.IP
 	portalPorts []int
 	dnsAddrs    []net.IP
+	checkAddrs  []net.IP
+	checkPorts  []int
+	// vpn is the handover hole: a VPN client's handshake, and nothing else,
+	// while the lockdown otherwise stands. Never set alongside a gap.
+	vpn []firewall.Endpoint
 	// logTo names the pflog interface the DNS rules log to. Empty means log
 	// without naming a device, which pf sends to pflog0 and discards harmlessly
 	// if that does not exist either. It is empty whenever we could not create
@@ -58,32 +67,49 @@ type gap struct {
 
 // isOpen reports whether there is anything to let through.
 func (g gap) isOpen() bool {
-	return len(g.portalAddrs) > 0 || len(g.dnsAddrs) > 0
+	return len(g.portalAddrs) > 0 || len(g.dnsAddrs) > 0 || len(g.checkAddrs) > 0
 }
 
-// gapFromHosts folds the allow-list into the two tables the ruleset uses.
-// Hosts flagged AllowDNSTo become resolvers; everything else is portal.
+// gapFromHosts folds the allow-list into the tables the ruleset uses.
+// Hosts flagged AllowDNSTo become resolvers, hosts flagged Check go to the
+// check table with their own port set, and everything else is portal.
 func gapFromHosts(hosts []firewall.Host) gap {
 	var g gap
 	ports := map[int]bool{}
+	checkPorts := map[int]bool{}
 	for _, h := range hosts {
-		if h.AllowDNSTo {
+		switch {
+		case h.AllowDNSTo:
 			g.dnsAddrs = append(g.dnsAddrs, h.Addrs...)
-			continue
-		}
-		g.portalAddrs = append(g.portalAddrs, h.Addrs...)
-		for _, p := range h.TCPPorts() {
-			ports[p] = true
+		case h.Check:
+			g.checkAddrs = append(g.checkAddrs, h.Addrs...)
+			for _, p := range h.TCPPorts() {
+				checkPorts[p] = true
+			}
+		default:
+			g.portalAddrs = append(g.portalAddrs, h.Addrs...)
+			for _, p := range h.TCPPorts() {
+				ports[p] = true
+			}
 		}
 	}
-	for p := range ports {
-		g.portalPorts = append(g.portalPorts, p)
-	}
-	sort.Ints(g.portalPorts)
+	g.portalPorts = sortedPorts(ports)
 	if len(g.portalPorts) == 0 {
 		g.portalPorts = defaultPortalPorts
 	}
+	g.checkPorts = sortedPorts(checkPorts)
 	return g
+}
+
+// sortedPorts turns a port set into an ordered list, so the same inputs
+// always render the same ruleset.
+func sortedPorts(set map[int]bool) []int {
+	var out []int
+	for p := range set {
+		out = append(out, p)
+	}
+	sort.Ints(out)
+	return out
 }
 
 // ==== the rules themselves ================================================
@@ -138,6 +164,7 @@ func render(g gap) string {
 		b.WriteString("# widen its own hole afterwards by changing what its name resolves to.\n")
 		b.WriteString(renderTable(portalTable, g.portalAddrs))
 		b.WriteString(renderTable(dnsTable, g.dnsAddrs))
+		b.WriteString(renderTable(checkTable, g.checkAddrs))
 		b.WriteString("\n")
 	}
 
@@ -151,6 +178,17 @@ func render(g gap) string {
 			for _, af := range []string{"inet ", "inet6"} {
 				fmt.Fprintf(&b, "pass out quick %s proto tcp to <%s> %s keep state\n",
 					af, portalTable, renderPorts(g.portalPorts))
+			}
+		}
+		if len(g.checkAddrs) > 0 {
+			b.WriteString("\n# Portalguard's own checks: the re-probe that notices a finished login, and\n")
+			b.WriteString("# the certificate check on a remembered host. Their addresses are outside\n")
+			b.WriteString("# the gap by nature - a probe endpoint's real address only appears once the\n")
+			b.WriteString("# portal stops hijacking DNS - so they get their own table and ports, and\n")
+			b.WriteString("# leave with the gap.\n")
+			for _, af := range []string{"inet ", "inet6"} {
+				fmt.Fprintf(&b, "pass out quick %s proto tcp to <%s> %s keep state\n",
+					af, checkTable, renderPorts(g.checkPorts))
 			}
 		}
 		if len(g.dnsAddrs) > 0 {
@@ -170,8 +208,38 @@ func render(g gap) string {
 		}
 	}
 
+	if len(g.vpn) > 0 {
+		b.WriteString("\n# The handover: only the VPN client's own connection may leave, so nothing\n")
+		b.WriteString("# goes out in the clear between sealing and the tunnel coming up. Portalguard\n")
+		b.WriteString("# releases everything the moment the tunnel carries the default route.\n")
+		for _, e := range g.vpn {
+			b.WriteString(renderVPN(e))
+		}
+	}
+
 	b.WriteString("\n")
 	b.WriteString(blocks)
+	return b.String()
+}
+
+// renderVPN emits the pass rules for one VPN endpoint: one family for a
+// pinned address, both for "any".
+func renderVPN(e firewall.Endpoint) string {
+	proto := e.Proto
+	if proto != "tcp" {
+		proto = "udp"
+	}
+	if e.Addr != nil {
+		af := "inet "
+		if e.Addr.To4() == nil {
+			af = "inet6"
+		}
+		return fmt.Sprintf("pass out quick %s proto %s to %s port %d keep state\n", af, proto, e.Addr, e.Port)
+	}
+	var b strings.Builder
+	for _, af := range []string{"inet ", "inet6"} {
+		fmt.Fprintf(&b, "pass out quick %s proto %s to any port %d keep state\n", af, proto, e.Port)
+	}
 	return b.String()
 }
 
@@ -238,5 +306,6 @@ func renderPorts(ports []int) string {
 // must kill states for: not just the originally detected portal IP, but
 // anything added by `portalguard allow` since.
 func (g gap) allAddrs() []net.IP {
-	return append(append([]net.IP(nil), g.portalAddrs...), g.dnsAddrs...)
+	out := append(append([]net.IP(nil), g.portalAddrs...), g.dnsAddrs...)
+	return append(out, g.checkAddrs...)
 }

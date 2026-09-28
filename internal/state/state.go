@@ -66,6 +66,15 @@ const (
 	// EventRelease aborts from anywhere: rules torn down, back to Idle. This
 	// is the escape hatch, and it is legal in every state.
 	EventRelease Event = "RELEASE"
+	// EventAdopt records a machine being placed at a state another process
+	// reached, rather than moving there itself.
+	//
+	// It is deliberately absent from the transition table below. It is not a
+	// move the machine makes; it is the machine being told where it already
+	// is, and admitting it as a normal event would be a hole straight through
+	// the table's whole purpose. Only NewMachineAt applies it, and only to a
+	// state read back from the kernel. See session.go's Resume.
+	EventAdopt Event = "ADOPT"
 )
 
 // ==== the legal moves =====================================================
@@ -89,6 +98,9 @@ var transitions = map[State]map[Event]State{
 	},
 	LockedDown: {
 		EventOpenGap: GapOpen,
+		// A lockdown with no portal behind it - held while a VPN reconnects
+		// on an ordinary network - hands straight over.
+		EventHandOff: HandedOff,
 		// A portal can vanish between detection and lockdown (someone else on
 		// the account logged in); allow the shortcut to Authenticated.
 		EventAuthenticated: Authenticated,
@@ -172,6 +184,26 @@ type Machine struct {
 // NewMachine returns a machine in Idle.
 func NewMachine() *Machine {
 	return &Machine{state: Idle, now: time.Now}
+}
+
+// NewMachineAt returns a machine already standing at s, for a process picking
+// up work an earlier one started. The note says where that belief came from
+// and is recorded in history, so `status` can show a resumed session as
+// resumed rather than passing it off as one this process drove.
+//
+// This is the one way into the machine that does not go through the transition
+// table, which is why it validates s against the table's own key set: a state
+// the table has never heard of has no legal moves out of it, and a machine
+// parked there would refuse every event including the ones that release it.
+func NewMachineAt(s State, note string) (*Machine, error) {
+	if _, ok := transitions[s]; !ok {
+		return nil, fmt.Errorf("state: cannot adopt unknown state %q", s)
+	}
+	m := &Machine{state: s, now: time.Now}
+	m.history = append(m.history, Transition{
+		From: Idle, Event: EventAdopt, To: s, At: m.now(), Note: note,
+	})
+	return m, nil
 }
 
 // State returns the current state.

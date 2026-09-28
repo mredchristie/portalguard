@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -10,17 +11,30 @@ import (
 	"time"
 
 	"portalguard/internal/firewall"
+	"portalguard/internal/netinfo"
 	"portalguard/internal/portal"
 )
 
 // fakeBackend records calls so tests can assert on the order the firewall was
 // driven in, without needing root or a real packet filter.
 type fakeBackend struct {
-	mu       sync.Mutex
-	calls    []string
-	allowed  []firewall.Host
-	failOn   string
+	mu      sync.Mutex
+	calls   []string
+	allowed []firewall.Host
+	failOn  string
+	// phase is what Status reports, standing in for the loaded ruleset that a
+	// second invocation would read back from the kernel.
+	phase    firewall.Phase
 	released int
+	// notEnforced, when set, is what Enforced reports as the reason the
+	// rules are no longer being applied.
+	notEnforced string
+}
+
+func (f *fakeBackend) Enforced(context.Context) (bool, string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.notEnforced == "", f.notEnforced
 }
 
 func (f *fakeBackend) record(name string) error {
@@ -51,6 +65,10 @@ func (f *fakeBackend) AllowHost(_ context.Context, h firewall.Host) error {
 
 func (f *fakeBackend) Seal(context.Context) error { return f.record("seal") }
 
+func (f *fakeBackend) AllowVPN(_ context.Context, es []firewall.Endpoint) error {
+	return f.record(fmt.Sprintf("vpn:%d", len(es)))
+}
+
 func (f *fakeBackend) Release(context.Context) error {
 	f.mu.Lock()
 	f.released++
@@ -59,7 +77,13 @@ func (f *fakeBackend) Release(context.Context) error {
 }
 
 func (f *fakeBackend) Status(context.Context) (firewall.Status, error) {
-	return firewall.Status{Backend: "fake"}, nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return firewall.Status{
+		Backend: "fake",
+		Phase:   f.phase,
+		Allowed: append([]firewall.Host(nil), f.allowed...),
+	}, nil
 }
 
 func (f *fakeBackend) callsMade() []string {
@@ -99,11 +123,17 @@ func (ps *portalServer) login() {
 }
 
 func newTestSession(fw firewall.Backend, probeURL string) *Session {
+	return NewSession(fw, testProber(probeURL), nil)
+}
+
+// testProber probes one local endpoint and nothing else: no DNS hijack check,
+// no default probe list reaching the real internet from a unit test.
+func testProber(probeURL string) *portal.Prober {
 	p := portal.NewProber()
 	p.SkipDNSCheck = true
 	p.Timeout = 2 * time.Second
 	p.Probes = []portal.Probe{{Name: "test", URL: probeURL, Expect: portal.ExpectNoContent}}
-	return NewSession(fw, p, nil)
+	return p
 }
 
 func TestSessionFullFlow(t *testing.T) {
@@ -153,7 +183,8 @@ func TestSessionFullFlow(t *testing.T) {
 	if err := s.Seal(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.HandOff(ctx); err != nil {
+	stubTunnel(t, &netinfo.Tunnel{Interface: "utun9"})
+	if _, err := s.HandOff(ctx, DefaultVPNEndpoints(), time.Second); err != nil {
 		t.Fatal(err)
 	}
 	if s.Machine().State() != HandedOff {

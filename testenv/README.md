@@ -75,6 +75,91 @@ both halves, each doing the part it can honestly do.
 Closing these needs a second device on the LAN running the portal, at which
 point the split disappears and `e2e.sh` can point at it with `GATEWAY=`.
 
+## The off-box hotspot
+
+Everything above runs on loopback, and loopback is the one thing the lockdown
+never filters. `testenv/hotspot/` is the fix: a BT-shaped portal spread over
+four containers under Apple's `container` tool, each on its own address on
+`192.168.64.0/24`, reached over `bridge100`:
+
+```
+$ route -n get 192.168.64.4
+  interface: bridge100
+      flags: <UP,HOST,DONE,LLINFO,WASCLONED,IFSCOPE,IFREF>
+```
+
+No `LOCAL` flag, so pf filters it like any other interface. Blocked means
+blocked.
+
+| Host | Address | Serves |
+| --- | --- | --- |
+| `www.guestwifi.test` | its own | probe interception on 80, the login page on 8443, and the network's DNS |
+| `cdn.guestwifi.test` | its own | the script that reveals the login page, on 80 and 443 |
+| `reg.guestwifi.test` | its own | where the login form posts, on 80 and 443 |
+| `net` | its own | "the internet": where the probe names resolve after login |
+
+The shape is BT's (`docs/gap-scope.md`): the page ships hidden and a script
+from `cdn` reveals it, so with `cdn` blocked it comes up blank. The login only
+completes if `reg` is reached. And after login the probe names resolve to
+`net`, outside the gap, which is the case that showed the re-probe could never
+see a login finish.
+
+DNS is the network's, as at a real hotspot: `www` answers every name with its
+own address until login, and with `net`'s after it. Only the portal's own
+three names resolve truthfully throughout. `hotspot.sh dns-on` points this
+Mac's DNS at it, which also means the Mac is effectively offline until
+`dns-off`, exactly as it would be on the real thing.
+
+Setting up, once:
+
+```fish
+brew install container
+container system start
+brew install mkcert
+mkcert -install        # optional: HTTPS on cdn and reg, needed for `known`
+```
+
+Running it (disconnect the VPN first - `run` refuses to start beside one, and
+NordVPN drops DNS to anything but its own servers):
+
+```fish
+make hotspot-up        # as you, not root: the container service is per-user
+make hotspot-demo      # first visit
+make hotspot-known     # next visit, after hotspot-demo has run
+make hotspot-down
+```
+
+`hotspot-demo` is the test and the recording at once. `run` holds the
+foreground with the default probe list - no `-probes-file` - and a background
+"browser" on a timer loads the page, finds `site.js` blocked, runs `allow` and
+`remember` as a second process, reloads, and logs in. Every one of those steps
+is also a check, and the run ends with a verdict:
+
+```
+=== verdict ===
+ok   login page reachable through the gap
+ok   cdn blocked before allow (off-box, so pf is really filtering)
+ok   cdn reachable after allow
+ok   login completes through reg
+ok   run noticed the login and sealed
+all checks passed
+```
+
+`hotspot-known` is the next visit to the same network: `remember` saved `cdn`
+and `reg` under `guestwifi.test`, so `run` tries them itself, opening each only
+after a TLS handshake with a certificate valid for its name. That is why it
+needs `mkcert -install`: without a trusted certificate the check correctly
+fails and the hosts are not opened. `remember` writes to the real
+`/etc/portalguard/known-networks.json`; the `guestwifi.test` entry is harmless
+but can be deleted from there by hand.
+
+`run` also opens the login page in your real browser, where you can watch it
+come up blank and then render once the gap widens. That is the thing to
+screen-record for a demo, next to the terminal.
+
+DNS and pf are both restored on exit, however the script exits. If something
+kills it hard: `./testenv/hotspot.sh dns-off` and `make rescue`.
+
 ## What it does and does not simulate
 
 It simulates the portal's **answers**: the redirect, the interstitial, the 511,
@@ -279,6 +364,71 @@ accept step live from the same recorded shell is what caused a visible
 glitch (typing a command over live output) in an earlier take - `demo.sh`
 avoids the whole problem by never backgrounding the privileged command at
 all, only the harmless `curl`.
+
+To capture it:
+
+```fish
+asciinema rec portalguard-demo.cast --command "make demo"
+```
+
+`--command` matters: without it the recording starts in your shell and the
+first thing on screen is you typing, plus whatever your prompt says about
+the machine. Keep the window narrow (68 columns is what the committed cast
+uses) so nothing wraps when it plays back somewhere smaller. `-redact` is
+already in `demo.sh`, so no real hostname reaches the file, but read the
+`.cast` before pushing it anyway: it is a plain-text transcript of your
+terminal, prompt and all.
+
+## Recording the two-process demo
+
+The single-process demo cannot show the interesting fix. `allow` widening a
+gap that another process opened is the thing that used to fail with
+`cannot apply EXTEND_GAP in state IDLE`, and the whole point is that the
+second command is a second process.
+
+```fish
+make testenv-up
+make demo-allow
+```
+
+`testenv/demo-allow.sh` runs `run` in the foreground and, on a timer, has a
+separate `portalguard allow` widen the live gap, then reads `status` back
+out of the kernel to show the gap grew, then logs in. Each background step
+is fenced with a banner saying which terminal is speaking, because one pane
+cannot show two. Both bugs the field trip found are visible in one take: the
+gap widens from another process, and the leak report at the end comes back
+with real numbers rather than "the counters could not be read", which is the
+`/var/run/portalguard.counters` fix doing its job.
+
+The addresses it opens are `127.0.0.2` and `127.0.0.3:8443` rather than
+hostnames, because the fixture answers DNS on port 5354 and is not this
+machine's resolver, so a made-up name would fail to resolve and the
+recording would be about that instead. Override with `WIDEN`, and the two
+delays with `WIDEN_AT` and `LOGIN_AT`, if a take lands out of order:
+
+```fish
+sudo env WIDEN="cdn.example.net reg.example.net" WIDEN_AT=12 ./testenv/demo-allow.sh
+```
+
+(`sudo env`, not `WIDEN=... sudo`: sudo's `env_reset` drops the variable
+before the script ever sees it. That is the same trap `make e2e REDACT=1`
+documents in the Makefile.)
+
+**Two real panes instead.** If you would rather show two terminals side by
+side, which is closer to what you actually do at the hotspot, record a tmux
+session (`brew install tmux`) and drive it from outside:
+
+```fish
+asciinema rec portalguard-allow.cast --command "tmux new-session -s pg"
+# then, from another shell while it records:
+tmux send-keys -t pg.0 "sudo ./bin/portalguard run -probes-file testenv/probes.json -wait 90s -redact" Enter
+tmux split-window -t pg -h
+tmux send-keys -t pg.1 "sudo ./bin/portalguard allow 127.0.0.2 127.0.0.3:8443" Enter
+```
+
+It reads better and it is more work: two panes means half the width each,
+and sudo may prompt in a pane the recording is watching. The banner version
+above is what `make demo-allow` gives you with nothing to install.
 
 ## Endpoints
 

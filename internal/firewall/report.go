@@ -45,6 +45,11 @@ type Report struct {
 	PortalPackets uint64 `json:"portal_packets"`
 	PortalBytes   uint64 `json:"portal_bytes"`
 
+	// CheckPackets went to Portalguard's own checks: the re-probe that
+	// notices a finished login, and certificate checks on remembered hosts.
+	CheckPackets uint64 `json:"check_packets,omitempty"`
+	CheckBytes   uint64 `json:"check_bytes,omitempty"`
+
 	// Resolvers is who the DNS hole pointed at.
 	Resolvers []net.IP `json:"resolvers,omitempty"`
 
@@ -95,6 +100,14 @@ type Report struct {
 	// gets printed and can be kept.
 	ProcessNote string `json:"process_note,omitempty"`
 
+	// SampleAttempts and SampleFailures count readings of the counters, not
+	// packets. They exist so an all-zero report can say which kind of zero it
+	// is: a quiet network, or a measurement that never worked. Without them
+	// the two are indistinguishable, and the report has to guess at its own
+	// cause - which it did, wrongly, on a real run.
+	SampleAttempts int `json:"sample_attempts,omitempty"`
+	SampleFailures int `json:"sample_failures,omitempty"`
+
 	// Source records where the numbers came from, so the rendering can be
 	// precise about its own limits.
 	Source string `json:"source,omitempty"`
@@ -115,11 +128,25 @@ func (r Report) GapDuration() time.Duration {
 // Enriched reports whether anything supplied per-query detail.
 func (r Report) Enriched() bool { return len(r.Names) > 0 || len(r.Processes) > 0 }
 
-// Empty reports whether nothing at all was counted, which usually means the
-// counters could not be read rather than that nothing happened.
+// Empty reports whether nothing at all was counted. On its own that says
+// nothing about why: ask CountersUnavailable for that.
 func (r Report) Empty() bool {
 	return r.BlockedOutPackets == 0 && r.BlockedInPackets == 0 &&
-		r.DNSPackets == 0 && r.PortalPackets == 0
+		r.DNSPackets == 0 && r.PortalPackets == 0 && r.CheckPackets == 0
+}
+
+// CountersUnavailable reports whether the numbers are missing because the
+// measurement failed, rather than because there was nothing to count.
+//
+// Zero attempts means nothing was ever read - there was no reload between
+// engaging and reporting - and every attempt failing means the counters could
+// not be read at all. Anything in between produced at least one real reading,
+// so a zero from it is a genuine zero and must not be dressed up as a broken
+// measurement: that would be the same error in the opposite direction, and
+// the whole point of this report is to keep "we did not look" and "nothing
+// happened" apart.
+func (r Report) CountersUnavailable() bool {
+	return r.SampleAttempts == 0 || r.SampleFailures == r.SampleAttempts
 }
 
 // ==== wording =============================================================
@@ -148,6 +175,10 @@ func (r Report) String() string {
 	if r.PortalPackets > 0 {
 		fmt.Fprintf(&b, "The login page itself accounted for %s.\n",
 			packets(r.PortalPackets, r.PortalBytes))
+	}
+	if r.CheckPackets > 0 {
+		fmt.Fprintf(&b, "Portalguard's own checks accounted for %s.\n",
+			packets(r.CheckPackets, r.CheckBytes))
 	}
 
 	switch {
@@ -336,4 +367,20 @@ func containsAny(s string, subs ...string) bool {
 type Reporter interface {
 	// LeakReport returns what the backend observed since Lockdown.
 	LeakReport() Report
+}
+
+// NameWatcher is implemented by backends that can say, while the gap is still
+// open, which hostnames have been looked up through it.
+//
+// Separate from Reporter because it answers a different question at a
+// different time. A report is an account of a window that has closed; this is
+// evidence about a window still open, and the only reason it is worth having
+// is that the user can still act on it - a portal host that is missing from
+// the gap can still be added to it.
+//
+// The names are raw: lookups rather than blocks, and machine-wide rather than
+// the portal's. A caller that shows them to a person has to filter them
+// first.
+type NameWatcher interface {
+	NamesSeen() []string
 }

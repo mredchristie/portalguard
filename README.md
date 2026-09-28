@@ -39,7 +39,19 @@ do.
 
 ## Status
 
-v0.1, working. Detection and the state machine work. The macOS pf backend is
+v0.2. Two additions over v0.1:
+
+- **The handover to your VPN.** v0.1 released every rule and then asked you
+  to start the VPN, so everything queued on the machine went out in the clear
+  until the tunnel came up. `run` now seals and then holds the lockdown with
+  only VPN traffic allowed out, and steps aside the moment the tunnel carries
+  your traffic. `handoff` does the same after a plain `lockdown`, on any
+  network. See "Handing over to your VPN" below.
+- **The portal's redirect chain.** Detection follows the portal's own
+  redirects to its login page and pins every host on the way into the gap,
+  instead of only the first.
+
+Detection and the state machine work. The macOS pf backend is
 implemented and verified on real hardware: both rulesets parse, `LOCKED_DOWN`
 loads and genuinely blocks, and `make rescue` restores networking. The full
 `LOCKED_DOWN -> GAP_OPEN -> AUTHENTICATED -> SEALED` cycle is e2e-tested
@@ -50,6 +62,18 @@ Process attribution is implemented but confirmed not to work on this
 platform for this rule shape (pf reports a fixed value instead of a real
 pid), so the report says so rather than guessing - see "The leak report"
 below.
+
+The separate commands (`lockdown`, `allow`, `seal`, `release`) work across
+processes, so `allow` can widen a gap from a second terminal while `run` waits
+in the first. The live ruleset is the authority for that; a session file in
+`/var/run` supplies only what pf cannot hold.
+
+The whole flow also runs against an off-box, BT-shaped test portal
+(`make hotspot-demo`, see `testenv/README.md`): four hosts on their own
+addresses, which pf genuinely filters, unlike the loopback fixtures before it.
+Its first runs found three bugs every earlier test had passed, all now fixed:
+`run` could not see a login finish, remembered hosts could never open
+themselves, and `allow` lost the names of what it opened.
 
 Linux and Windows are stubs: designs recorded, no implementation.
 
@@ -73,6 +97,14 @@ If that line is missing, rules load fine and filter *nothing* - Portalguard
 would report the machine locked down while it's wide open. So it checks for
 the line every time and refuses to start without it.
 
+**Three bookkeeping files in `/var/run`.** `portalguard.pf-token` holds pf's
+reference token so any invocation can drop it, `portalguard.session` records
+what the running session knows, so `allow` and `seal` work as separate
+commands, and `portalguard.counters` carries the running packet totals across
+the rule loads that reset pf's own. `/var/run` is cleared on reboot, which is
+the point: no file outlives the rules it describes, and none of them is
+trusted over the live ruleset.
+
 ## Quick start
 
 ```fish
@@ -81,6 +113,21 @@ make build
 # Read-only. Never touches the firewall.
 ./bin/portalguard detect -v
 ```
+
+### Install
+
+`make build` leaves the binary at `./bin/portalguard`, which is fine for
+trying it out. To run it as plain `portalguard` from anywhere, put it on your
+PATH:
+
+```fish
+sudo make install
+```
+
+This copies the binary to `/usr/local/bin/portalguard`. Sudo is needed
+because `/usr/local/bin` is root-owned on a stock Mac; `make uninstall`
+removes it again. Everything else in this README works either way - just
+swap `./bin/portalguard` for `portalguard` once it's installed.
 
 Before anything can program the packet filter, once per machine:
 
@@ -106,21 +153,27 @@ end
 ```
 
 Test it against a fake portal without leaving the house - see
-[`testenv/README.md`](testenv/README.md).
+[`testenv/README.md`](testenv/README.md). `make demo` runs the whole flow
+against that fixture with nothing to type, and `make demo-allow` runs the
+two-process version, where a separate `allow` widens the gap while `run`
+waits. Both are shaped for recording with asciinema.
 
 ## Commands
 
 | Command                | Root | What it does                                                   |
 | ---------------------- | ---- | -------------------------------------------------------------- |
 | `detect`               | no   | Classify the network. Changes nothing.                          |
+| `check`                | no   | One HTTP request. Prints `internet: reachable` or `blocked`.    |
 | `print-rules`          | no   | Show the firewall rules it would apply, without applying them.  |
 | `status`               | no*  | Show what is currently being enforced. *Root, to read the rules.|
 | `install-anchor`       | yes  | The one-line setup above. Once per machine.                     |
 | `uninstall-anchor`     | yes  | Revert that.                                                    |
-| `run`                  | yes  | The whole flow, blocking until you have logged in.              |
+| `run`                  | yes  | The whole flow, blocking until you have logged in. Names portal hosts the gap is missing while it waits.|
 | `lockdown`             | yes  | Block everything.                                               |
-| `allow [host]`         | yes  | Open the gap for the detected portal, or widen it for a host.   |
+| `allow [host:port...]` | yes  | Open the gap for the detected portal, or widen it for named hosts.|
+| `remember`             | yes  | Save what `allow` widened the gap with, so the next visit to this domain can try it automatically once it verifies. See below.|
 | `seal`                 | yes  | Close the gap, keep the lockdown.                               |
+| `handoff`              | yes  | Keep the lockdown, let only your VPN out, step aside once its tunnel is up.|
 | `release`              | yes  | Tear everything down. The escape hatch.                         |
 
 ## How it decides
@@ -182,6 +235,7 @@ internal/firewall/     backend interface, host types, fail-safe teardown
   backend/             build-tagged selection
 testenv/               a fake captive portal to test against
 docs/architecture.md   how the pieces fit, and what is proven
+docs/gap-scope.md      how wide the gap should be, and why that is hard
 docs/pf-design.md      the firewall rules, explained line by line
 docs/demo.md           reproducing the leak, and redacting the capture
 ```
@@ -211,15 +265,64 @@ interface, the name is tunnel-shaped, and the interface has an address. The
 last rules out macOS's own permanently-up, addressless `utun` devices, of
 which there are usually seven.
 
-Two known limitations, detailed in [`docs/pf-design.md`](docs/pf-design.md):
+One known limitation, detailed in [`docs/pf-design.md`](docs/pf-design.md):
 
 - **The DNS hole in `GAP_OPEN` is machine-wide.** Background daemons' queued
   lookups fire at the portal's resolver the moment it opens. Connections
-  stay blocked, but hostnames leak. v0.1 keeps the gap short and logs what
-  went through; v0.2 will scope the rules to the browser's uid.
-- **The handoff window isn't closed yet.** `HANDED_OFF` releases our rules
-  before you bring the VPN up, leaving a brief unprotected moment - a
-  smaller version of the problem this tool exists to solve.
+  stay blocked, but hostnames leak. Portalguard keeps the gap short and logs
+  what went through. The fix once planned for v0.2, scoping the DNS rule to
+  the browser's user id, cannot work on macOS: apps do not send their own DNS
+  queries, they ask `mDNSResponder`, which sends them all as one system user.
+  The real fix is a filtering resolver of Portalguard's own, planned for
+  v0.3; see "The DNS hole is machine-wide" in `docs/pf-design.md`.
+
+## Handing over to your VPN
+
+After the seal, `run` does not release the lockdown and leave you to start
+your VPN in the open. It keeps blocking everything except the VPN client's
+own connection, waits for the tunnel, and releases only once the tunnel
+carries your traffic:
+
+```
+Authenticated and sealed. Traffic is still blocked.
+
+Connect your VPN now. Until its tunnel is up, only VPN traffic can leave.
+Waiting up to 3m0s for the tunnel...
+
+Your VPN is up on utun4. Portalguard has stepped aside; the VPN owns the connection.
+```
+
+By default the VPN hole is the standard ports of the common protocols, to
+any address, since most clients pick their server when they connect:
+WireGuard (UDP 51820, which is also NordLynx), OpenVPN (UDP and TCP 1194)
+and IKEv2 (UDP 500 and 4500). If your VPN uses something else, name it:
+
+```fish
+sudo portalguard run -vpn vpn.example.net:443/tcp
+sudo portalguard handoff -vpn 203.0.113.5:51820
+```
+
+TCP 443 is not in the default on purpose: open to any address, it would be
+ordinary HTTPS for every app on the machine. Name your server instead.
+
+The same works without a portal. On a network where you just want nothing
+out until the VPN is back:
+
+```fish
+sudo portalguard lockdown
+sudo portalguard handoff      # then connect the VPN
+```
+
+Some VPNs bring their own firewall. NordVPN, for one, replaces pf's whole
+ruleset with its kill switch when it connects, which switches Portalguard's
+rules off. Portalguard notices, and tells you the VPN's kill switch held the
+line while it connected instead of claiming it did. It also stops the login
+wait if anything switches its rules off mid-login, and `status` says whether
+the lockdown is actually being applied.
+
+If no tunnel comes up within `-wait` (3 minutes by default), the VPN hole
+closes again and the lockdown stays. `-no-handoff` stops `run` at `SEALED`,
+as v0.1 did.
 
 ## The leak report
 
@@ -289,6 +392,124 @@ Before showing anyone, replace names with categories, not products
 (`<mail provider>`, not the brand). Full procedure in
 [`docs/demo.md`](docs/demo.md).
 
+## Tested against
+
+Real networks it has been pointed at, and what happened. The lab has a fake
+portal in `testenv/`; this table is the part that isn't a lab.
+
+### BT Wi-Fi (Waitrose)
+
+| | |
+| --- | --- |
+| Detection | **worked** - found `www.btwifi.com` from the probe redirect |
+| Pinning | **worked** - `192.168.23.21` |
+| Ports | **worked** - opened 80, 443 and 8443, taking the non-standard port out of the redirect rather than assuming defaults |
+| Lockdown and gap | **worked** |
+| Ctrl-C | **worked** - released cleanly |
+| Logging in | **failed on the first trip**, worked on the second once the gap was widened |
+| `allow` | **failed on the first trip**, worked on the second from a second terminal |
+| Seal and release | **worked** - `AUTHENTICATED`, then `SEALED`, then released |
+
+Two trips, and everything below came out of the first one. Both findings are
+worth reading as warnings about the shape of the problem rather than as bugs
+in a feature.
+
+**The login page came up blank, not unstyled.** The page loaded fine - HTTP
+200, the full HTML - but it ships hidden behind `.btwf-site { display: none }`
+and is revealed by JavaScript from `cdn.btwifi.com`, which the gap did not
+include. A blocked stylesheet gives you an ugly page you can still use; a
+blocked script that owns `display` gives you a white rectangle with nothing on
+screen to say which host to unblock. The portal spans four hosts and three
+ports: `www.btwifi.com:8443` for the page, `cdn.btwifi.com` for all JS and CSS,
+`reg.btwifi.com` for the auth POST, `info.btwifi.com:442` for the terms.
+
+That's the ordinary shape of a portal built by people who build websites, so
+none of it gets special-cased. The options for handling it, and the one taken,
+are in [`docs/gap-scope.md`](docs/gap-scope.md).
+
+Since that trip, `run` says which host is missing. DNS stays open while the gap
+is, so every lookup this machine makes goes past the leak reader, the portal's
+own included. While it waits for the login it prints the names that were looked
+up and are not in the gap, narrowed to the ones sharing a domain with the
+portal so the machine-wide DNS noise stays out of it:
+
+```
+Waiting up to 10m0s for the login to go through...
+
+  Looked up but not open: cdn.btwifi.com, reg.btwifi.com
+  If the login page is blank or broken, these are what to open:
+    sudo portalguard allow cdn.btwifi.com reg.btwifi.com
+```
+
+It opens nothing. Which hosts end up in the gap stays a decision a person
+makes, for the same reason the tool never types your credentials: on a network
+that answers its own DNS - which, per the hijack check, it usually does -
+"widen automatically" means the portal picks what goes in the hole.
+
+That decision only has to be made once per network, though. After widening the
+gap by hand:
+
+```
+sudo portalguard remember
+```
+
+saves `cdn.btwifi.com` and `reg.btwifi.com` against BT Wi-Fi's domain. The next
+time the gap opens for that domain, `run` and `allow` both try those hosts
+automatically - but only the ones that complete a real TLS handshake with a
+certificate valid for their name, checked fresh against this network, on this
+connection. DNS on a hostile network proves nothing, since whoever runs the
+network answers it; a certificate does, since forging one takes the real
+private key rather than control of DNS. A host that doesn't pass falls back to
+being suggested, same as before. See
+[`docs/gap-scope.md`](docs/gap-scope.md), option E, for the reasoning and its
+limits - it ships pre-seeded with BT Wi-Fi's hosts, since that's the one this
+project has actually diagnosed by hand; everything else accrues the same way,
+`allow` then `remember`, once.
+
+**`allow` couldn't widen the gap** - the command that exists for exactly this
+situation was the one that didn't work. It failed with `cannot apply EXTEND_GAP
+in state IDLE`, because the state machine lived in the `run` process and a
+second invocation started from scratch. Fixed: the phase is now read back from
+the loaded ruleset and the rest from a session file, so `allow` works from a
+second terminal while `run` waits in the first:
+
+```fish
+# terminal 1
+sudo portalguard run
+
+# terminal 2, once the login page comes up blank
+sudo portalguard allow cdn.btwifi.com reg.btwifi.com info.btwifi.com:442
+```
+
+A bare host opens 80 and 443; `host:port` opens that port instead. Note that pf
+holds one port set for the whole gap, so a port opened for one host is open for
+every host in it.
+
+**Second trip, same hotspot: the full cycle worked.** Detection, lockdown, gap,
+then `allow cdn.btwifi.com reg.btwifi.com` from a second terminal widening the
+live gap while `run` waited in the first, then the login itself, then
+`AUTHENTICATED`, `SEALED`, release. Those two hosts were the whole difference
+between a blank rectangle and a working login page; `info.btwifi.com:442` is
+only needed if you want to read the terms. So the cross-process fix and the
+table-replacement fix are both confirmed on a real portal, not just against
+the fake kernel.
+
+One thing the trip broke, which is worth recording because it was caused by
+the fix: the leak report came back saying "No traffic was accounted for."
+pf's per-rule counters belong to the kernel, and *any* rule load resets them
+for every process, not just the one doing the loading. Sampling banked them
+into memory before each of its own reloads, which was enough while one process
+owned the whole run. Once `allow` could reload from a second terminal, that
+process banked the machine's counts into its own memory and exited with them,
+leaving the waiting `run` to report zero. The running totals now live in
+`/var/run/portalguard.counters`, so whichever process is about to reload banks
+them where the next one can find them.
+
+That report also asserted a cause it had never checked - it said the counters
+"could not be read" for any empty result, including a truthful zero. It now
+tracks how many samples were attempted and how many failed, and only blames
+the measurement when the measurement actually failed.
+
 ## A warning you can ignore
 
 Every rule load prints this, and it's not an error:
@@ -334,7 +555,8 @@ make rescue
 
 which is exactly `sudo pfctl -a portalguard -F all`. `sudo portalguard
 release` does the same and also drops the pf enable reference. A reboot also
-clears everything, since nothing is persisted.
+clears everything: no rule is ever written to disk, and the `/var/run`
+bookkeeping files go with it.
 
 Full detail - the anchor setup, every rule line by line, and how Portalguard
 stays out of NordVPN's way - is in [`docs/pf-design.md`](docs/pf-design.md).

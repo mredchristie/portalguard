@@ -42,7 +42,10 @@ const pfctlPath = "/sbin/pfctl"
 // because the main ruleset has no `anchor "portalguard"` line to reach them
 // through. This is the one failure that must never be papered over: it would
 // leave portalguard reporting LOCKED_DOWN over a wide open network.
-var ErrNoAnchorHook = errors.New(`pf: /etc/pf.conf has no anchor "portalguard" line, so portalguard's rules would load but never be evaluated; run: sudo portalguard install-anchor`)
+//
+// The usual cause is not a botched install but a macOS update: updates restore
+// the stock /etc/pf.conf and the hook goes with it. Seen after 26.7.1.
+var ErrNoAnchorHook = errors.New(`pf: /etc/pf.conf has no anchor "portalguard" line, so portalguard's rules would load but never be evaluated (macOS updates restore /etc/pf.conf, which removes it); run: sudo portalguard install-anchor`)
 
 // tokenRe extracts the reference token from `pfctl -E` output.
 var tokenRe = regexp.MustCompile(`(?i)token\s*:\s*(\d+)`)
@@ -67,10 +70,14 @@ type Backend struct {
 	// Status rather than failing the operation that hit it.
 	logNote string
 
-	// counters accumulate across every ruleset this process has loaded,
-	// because pf resets per-rule statistics on reload and we reload at every
-	// phase change.
+	// counters accumulate across every ruleset loaded during this engagement,
+	// by any invocation, because pf resets per-rule statistics on reload and
+	// every phase change reloads. Persisted; see counterPath in persist.go.
 	counters tally
+
+	// counterNoteMade stops a persistent failure to record the counters from
+	// being reported once per sample.
+	counterNoteMade bool
 
 	// gapOpened and gapClosed bound the window the report describes.
 	gapOpened time.Time
@@ -189,6 +196,11 @@ func (b *Backend) Release(ctx context.Context) error {
 	}
 	clearToken()
 
+	// The engagement is over, so the account closes with it. The totals stay
+	// in memory: a run torn down without a seal still has its report read
+	// after this returns.
+	clearTally()
+
 	b.phase = firewall.PhaseOff
 	b.allowed = nil
 	b.since = time.Time{}
@@ -244,7 +256,9 @@ func (b *Backend) Status(ctx context.Context) (firewall.Status, error) {
 	// that referenced them.
 	st.Allowed = nil
 	if st.Phase == firewall.PhaseGap {
-		st.Allowed = b.allowedFromKernel(ctx)
+		// syncFromKernel, at the top of this method, has already rebuilt
+		// b.allowed from the loaded rules and the tables they reference.
+		st.Allowed = append([]firewall.Host(nil), b.allowed...)
 	} else if residue := b.openAddrsLocked(ctx); len(residue) > 0 {
 		// Not reachable through any rule, but worth saying out loud: it means
 		// a teardown did not finish, and `pfctl -a portalguard -F Tables`
@@ -258,30 +272,6 @@ func (b *Backend) Status(ctx context.Context) (firewall.Status, error) {
 		st.Detail = b.logNote + "\n" + st.Detail
 	}
 	return st, nil
-}
-
-// allowedFromKernel rebuilds the allow-list from the pf tables. Called only
-// when the gap rules are loaded, so everything it returns is genuinely
-// permitted.
-func (b *Backend) allowedFromKernel(ctx context.Context) []firewall.Host {
-	var out []firewall.Host
-	if addrs := b.tableAddrs(ctx, portalTable); len(addrs) > 0 {
-		out = append(out, firewall.Host{
-			Name:   "portal",
-			Addrs:  addrs,
-			Reason: "captive portal login page",
-		})
-	}
-	if addrs := b.tableAddrs(ctx, dnsTable); len(addrs) > 0 {
-		out = append(out, firewall.Host{
-			Name:       "resolvers",
-			Addrs:      addrs,
-			Ports:      []int{53},
-			AllowDNSTo: true,
-			Reason:     "the portal login flow needs to resolve its own hostname",
-		})
-	}
-	return out
 }
 
 // availableLocked is Available without re-taking the mutex.

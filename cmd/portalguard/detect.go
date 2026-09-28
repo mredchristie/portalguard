@@ -157,6 +157,7 @@ flags:
 	}
 
 	res := prober.Detect(ctx)
+	prober.FollowChain(ctx, &res)
 
 	if *asJSON {
 		enc := json.NewEncoder(os.Stdout)
@@ -201,6 +202,9 @@ func printResult(res portal.Result, verbose bool) {
 		}
 		if len(res.PortalAddrs) > 0 {
 			fmt.Printf("  addresses  : %s\n", strings.Join(res.PortalAddrs, ", "))
+		}
+		for _, h := range res.Hops {
+			fmt.Printf("  redirects  : %s:%d (%s)\n", h.Host, h.Port, strings.Join(h.Addrs, ", "))
 		}
 	}
 

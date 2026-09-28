@@ -43,6 +43,11 @@ type Result struct {
 	// hole by changing DNS answers later.
 	PortalAddrs []string `json:"portal_addrs,omitempty"`
 
+	// Hops are the further hosts the portal redirected through on its way
+	// to the login page, each pinned at detection time like the portal host.
+	// Filled in by FollowChain, not by Detect. See docs/gap-scope.md, option B.
+	Hops []Hop `json:"hops,omitempty"`
+
 	// Ambiguous is set when probes disagreed - typically a portal that
 	// whitelists one of the probe endpoints. We report Portal in that case
 	// because locking down is the safe reading.

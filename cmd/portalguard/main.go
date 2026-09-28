@@ -40,10 +40,13 @@ type command struct {
 func commands() []command {
 	return []command{
 		{"detect", "probe the current network and classify it", runDetect},
+		{"check", "one HTTP request; prints internet: reachable or blocked", runCheck},
 		{"status", "show the firewall and state machine status", runStatus},
 		{"lockdown", "block all traffic (root)", runLockdown},
-		{"allow", "open the gap for the detected portal, or a named host (root)", runAllow},
+		{"allow", "open the gap for the detected portal, or widen an open one (root)", runAllow},
+		{"remember", "save what's open beyond the portal host as a known network, for next time (root)", runRemember},
 		{"seal", "close the gap, leaving the lockdown in place (root)", runSeal},
+		{"handoff", "hold the lockdown, let only your VPN out, step aside once its tunnel is up (root)", runHandoff},
 		{"release", "tear down all portalguard rules and restore networking (root)", runRelease},
 		{"run", "the whole flow: detect, lock down, open the gap, wait, seal (root)", runFlow},
 		{"print-rules", "print the pf ruleset without loading it", runPrintRules},

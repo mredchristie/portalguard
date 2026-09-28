@@ -263,6 +263,57 @@ provider on a second hostname is the usual case) gets it explicitly, via
 `sudo portalguard allow <host>`, which adds to `<pg_portal>` and is visible in
 `status`.
 
+### The check hole: `<pg_check>`
+
+Two things Portalguard itself does while the gap is open need to reach
+addresses outside it, and the ruleset above drops both:
+
+- **The re-probe that notices a finished login.** Before login the portal
+  answers `captive.apple.com` with its own address, which is in the gap. After
+  login the name resolves to the real endpoint, which never is. So the probe
+  that should see the login finish is dropped, and `run` waits out its timeout
+  on a network the user is already logged in to.
+- **The certificate check on a remembered host** (`gap-scope.md`, option E).
+  The host has to be reached to have its certificate checked, and it is not in
+  the gap until the check has passed. So the check timed out, every time, and
+  no remembered host could ever open itself.
+
+Both passed every test, because every test aimed them at loopback, and
+`pass quick on lo0 all` is the one rule nothing else can override. The
+off-box hotspot in `testenv/` is what exposed them.
+
+They get a third table and a rule of their own:
+
+```pf
+table <pg_check> persist { 192.168.64.6 }
+
+pass out quick inet  proto tcp to <pg_check> port 80 keep state
+pass out quick inet6 proto tcp to <pg_check> port 80 keep state
+```
+
+- **Separate from `<pg_portal>`**, so a check never widens the portal's port
+  set, and `status` can tell the two apart.
+- **The re-probe's addresses** are resolved before each poll and added only
+  when they are new and not already in the gap, so the ruleset reloads once
+  at login rather than every three seconds.
+- **A certificate check's address** goes in for exactly as long as the
+  handshake takes, on the one port being checked, and comes out again - with
+  its states killed - whether the check passed or not. A host that passes is
+  then opened properly, into `<pg_portal>`.
+- **Read back from the kernel** like the other tables, so an `allow` from a
+  second terminal carries the re-probe's hole across its reload instead of
+  silently dropping it.
+- **Gone at seal**, with the rest of the gap, states included.
+
+What it trusts is the network's DNS, which is the thing this design otherwise
+refuses to trust. The cost is bounded rather than zero: only the probes' own
+ports, only while the gap is open, only to what the probe names resolve to. The
+worst a lying answer buys is a probe response Portalguard reads as "logged in",
+which seals the gap - the safe direction. Scoping the rule to root's sockets
+with `user root` would narrow it further, but `user` matching is unverified on
+this platform (see section 6), and a rule that fails to load is worse than one
+that is slightly wide.
+
 ### The DNS hole is machine-wide
 
 The DNS pass rule is the one part of the gap that deserves to be uncomfortable,
@@ -311,18 +362,32 @@ story:**
   *"from 6 processes"* clause, specifically - not yet trustworthy on this
   machine, unlike the rest of the sentence.
 
-The real fix is v0.2 and it is narrow rather than visible. pf on macOS can
-match on the uid owning an outbound socket:
+**The fix planned for v0.2 does not work, and it is worth saying why.** The
+plan was to match on the uid owning the socket:
 
 ```pf
 pass out quick inet proto { tcp, udp } to <pg_dns> port 53 user 501 keep state
 ```
 
-Scope the DNS and portal rules to the uid of the browser doing the login and
-background daemons cannot reach the hole at all. That turns a machine-wide
-hole into a one-process hole. It needs to know which process will do the
-logging in, which is straightforward once there is a menu bar app that opens
-the login page itself.
+On macOS, apps do not send their own DNS queries. `getaddrinfo` asks
+`mDNSResponder` over IPC, and `mDNSResponder` sends the query from its own
+socket, as its own user (`_mdnsresponder`, uid 65). Every lookup leaving the
+machine carries that one uid, whichever app wanted the name. Scoped to the
+browser's uid, the rule matches nothing and the login breaks; scoped to 65,
+it matches everything and changes nothing. It is the same reason the leak
+report's process attribution comes back as the kernel's "not attributed"
+value rather than an app: there is no app on the packet to attribute.
+
+**v0.3: a filtering resolver.** For the length of the gap, Portalguard runs
+its own resolver on `127.0.0.1` and points the system at it. It forwards only
+names under the portal's registrable domain and names a human has passed to
+`allow`, answers everything else `REFUSED`, and keeps its own record of every
+refusal, so the "looked up but not open" suggestions come from that record
+instead of a `tcpdump` decode. The pf DNS rule then has only one socket to let
+through to the network's resolver: Portalguard's. The cost is that it changes
+the system's DNS settings while the gap is open, so a crash has to put them
+back, and that restore needs the same fail-safe care the pf anchor gets. That
+is why it is its own release.
 
 Addresses are **pinned at detection time**. The gap is written against the IPs
 the portal resolved to when we probed, not against a hostname. Otherwise a
@@ -567,13 +632,88 @@ answers `captive.apple.com` from CGNAT space, detection would report a hijack
 that is really just the VPN. Another reason v0.1 tests with Nord off - and a
 note for whoever adds "detect the portal from inside a half-up tunnel" later.
 
-**Handoff is not leak-free yet.** `HANDED_OFF` releases our rules and then the
-user brings the VPN up, which leaves a brief unprotected window - a smaller
-version of the problem this tool exists to solve. The fix, for v0.2, is to
-keep the lockdown in place and add a pass rule for the VPN's server endpoint,
-so traffic goes from "blocked" to "blocked except the tunnel" to "the tunnel
-handles it" with nothing open in between. That needs to know the VPN's
-endpoint address, which for Nord means reading it from the live tunnel config.
+### The handover (v0.2)
+
+v0.1 released every rule at `SEALED` and asked the user to start the VPN,
+which left everything queued on the machine free to go out in the clear
+until the tunnel came up: a smaller copy of the leak this tool exists to stop.
+
+v0.2 holds the lockdown instead, and adds pass rules for the VPN client's own
+connection and nothing else:
+
+```pf
+pass out quick inet  proto udp to any port 51820 keep state
+pass out quick inet6 proto udp to any port 51820 keep state
+...
+block drop out quick all
+block drop in  quick all
+```
+
+It then watches for a tunnel to take the default route, with the same test
+the VPN refusal uses (a `utun`/`ipsec`/`ppp` interface, with an address,
+holding the default route), and releases the anchor the moment one does. So
+traffic goes from "blocked", to "blocked except the VPN's handshake", to "the
+tunnel carries it", with nothing open in between. For the fraction of a
+second between the tunnel taking the route and the release, traffic into the
+tunnel is dropped rather than tunnelled, which is the safe way round.
+
+**Which endpoints.** Reading the live endpoint out of a VPN client's config
+turned out to be the wrong dependency: Nord picks its server at connect time,
+and its NordLynx tunnel lives inside a system extension. So by default the
+hole is the standard ports of the common protocols, to any address: WireGuard
+and NordLynx on UDP 51820, OpenVPN on UDP and TCP 1194, IKEv2 on UDP 500 and
+4500. `-vpn host:port/proto` names a server instead, resolved while the gap
+still lets DNS through, since there is none after the seal.
+
+TCP 443 is deliberately not a default. Several providers fall back to it,
+but open to any address it is ordinary HTTPS for every app on the machine.
+Anyone who needs it names their server, which pins the address.
+
+**A VPN with a kill switch takes over the firewall, and that is now
+noticed.** The first live run with NordVPN looked like a pass: lockdown,
+handover, connect, released on `utun4`. The control run did not: with only
+UDP 9 let out, which no VPN uses, NordVPN still connected. Snapshots of pf
+before and after connecting showed why. On connect, NordVPN's helper replaces
+pf's entire main ruleset with its own kill switch:
+
+```pf
+anchor "main/*" all
+block drop all
+...
+pass on en0 all user = 0 group = 101 flags any keep state
+pass on utun4 all flags S/SA keep state
+```
+
+No `anchor "portalguard"` line survives it, so our rules stay loaded and are
+never consulted. Nothing leaked, because Nord's own kill switch holds the line
+from that moment, but it was Nord doing the holding, not Portalguard, and
+Portalguard went on reporting a lockdown that was no longer being applied.
+
+That last part was the real bug, and it is general: anything that reloads
+pf's main ruleset (a kill switch, another firewall, a macOS update restoring
+`/etc/pf.conf`) silently turns the lockdown off. So v0.2 checks, through
+`firewall.Enforcer`, that pf is still enabled and the main ruleset still
+references our anchor:
+
+- `lockdown` checks straight after loading, and fails if the rules are not
+  being applied.
+- The login wait checks on every poll, and stops with a clear message if the
+  lockdown stops applying, because the machine is open from that moment.
+- The handover checks too. A VPN taking over is not fought (see "The v0.1
+  rule" above: two tools asserting "block everything but mine" is the fight
+  this design refuses to have); it is reported, and Portalguard still clears
+  its own inert rules when the tunnel comes up.
+- `status` prints `enforced : yes` or `NO`, with the reason.
+
+So the handover hole only does the work for VPN clients that leave pf alone.
+For a client with a pf kill switch, that kill switch is what protects the
+connect, and Portalguard says so rather than taking the credit.
+
+**What the handover cannot see.** A client that calls its provider's API
+before connecting (to pick a server, or refresh credentials) is blocked by the
+handover like everything else. If the tunnel never comes up, the hole closes
+again after `-wait` and the lockdown stays; nothing is released on a
+timeout.
 
 ---
 
@@ -661,10 +801,10 @@ Extension for v0.1.
 `status` without sudo degrades honestly rather than failing: it reports the
 backend and prints `pf requires root: re-run with sudo` instead of guessing.
 
-A menu bar app cannot ask for sudo on every click, so v0.2 will need a
+A menu bar app cannot ask for sudo on every click, so it will need a
 privileged helper installed via `SMAppService` - the same shape as
-`com.nordvpn.macos.helper`. The CLI's `sudo` requirement is a v0.1 shortcut,
-not the eventual design.
+`com.nordvpn.macos.helper`. The CLI's `sudo` requirement is a shortcut that
+has lasted into v0.2, not the eventual design.
 
 ---
 
@@ -753,10 +893,11 @@ load. Two caveats from the same man page, both of which we have to respect:
 **Content and attribution need pflog:** which hostnames were queried, and by
 what. There is no way to get that from a counter.
 
-### Two ruleset changes this needs - not yet applied
+### Two ruleset changes this needed - both now applied
 
-Both change rules that were reviewed in section 2, so they are recorded here
-rather than made.
+Both change rules that were reviewed in section 2, so they were recorded here
+before being made. Both are now in `rules.go`: the DNS rules carry
+`log (all, user, to pflog1)`.
 
 **1. The DNS rules need `log (all)`, not bare `log`.** From `pf.conf(5)`:
 
@@ -1108,12 +1249,13 @@ the reasoning survives the next person who wonders why.
 3. **DNS is the widest part of the gap.** Accepted, with the real leak named
    rather than the exotic one - see "The DNS hole is machine-wide". v0.1 ships
    the cheap mitigation: keep the gap short, log every query made through it,
-   and report the count when the gap closes. The `user`-scoped rules that
-   actually close it are v0.2.
+   and report the count when the gap closes. The `user`-scoped rules once
+   planned for v0.2 cannot work on macOS (see "The DNS hole is
+   machine-wide"); the fix is a filtering resolver, v0.3.
 4. **`--allow-active-vpn` as an opt-in escape hatch** rather than a hard
    refusal. Approved: a hard refusal punishes anyone whose VPN the detection
    misreads. Opt-in, loud, logged.
 
-One framing to keep when this goes public: the handoff window in section 3 is
-named rather than quietly ignored. An honest account of the leak that remains
+One framing to keep when this goes public: the handoff window in section 3 was
+named rather than quietly ignored, until v0.2 closed it. An honest account of the leak that remains
 is the thing that makes the account of the leaks we do close believable.

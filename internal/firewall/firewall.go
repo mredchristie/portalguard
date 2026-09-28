@@ -65,6 +65,11 @@ type Host struct {
 	// AllowDNSTo, when true, also permits UDP/TCP 53 to these addresses.
 	// Used for the resolver the portal hands out over DHCP.
 	AllowDNSTo bool `json:"allow_dns_to,omitempty"`
+	// Check marks a hole Portalguard needs for its own checks rather than for
+	// the user's login: the post-login re-probe, or the certificate check on
+	// a remembered host. Backends keep these apart from the portal's hole so
+	// they neither widen its port set nor outlive the check. See Checker.
+	Check bool `json:"check,omitempty"`
 	// Reason records why this hole exists, for `portalguard status`.
 	Reason string `json:"reason,omitempty"`
 }
@@ -136,4 +141,80 @@ type Backend interface {
 
 	// Status reads back the currently enforced configuration.
 	Status(ctx context.Context) (Status, error)
+}
+
+// ==== is anything actually being enforced? ===============================
+// Loading rules is not the same as enforcing them. Something else can turn
+// the packet filter off, or swap its ruleset, underneath us.
+
+// Enforcer is implemented by backends that can tell whether the rules they
+// loaded are still being evaluated. It exists because a VPN kill switch was
+// found replacing pf's whole main ruleset on connect: Portalguard's rules
+// stayed loaded, nothing referenced them any more, and the machine was open
+// while Portalguard reported it locked. Optional, like Reporter.
+type Enforcer interface {
+	// Enforced reports whether traffic is still passing through this
+	// backend's rules. When it is not, why says what changed.
+	Enforced(ctx context.Context) (ok bool, why string)
+}
+
+// ==== handing over to the VPN =============================================
+// Between sealing and the tunnel coming up, only the VPN's own handshake may
+// leave. Releasing first, as v0.1 did, leaks everything in between.
+
+// Endpoint is somewhere a VPN client connects to. A nil Addr means any
+// address, for clients whose server is chosen at connect time; the port and
+// protocol then carry the whole restriction.
+type Endpoint struct {
+	Addr  net.IP `json:"addr,omitempty"`
+	Port  int    `json:"port"`
+	Proto string `json:"proto"` // "udp" or "tcp"
+}
+
+// String renders the endpoint the way the -vpn flag takes it.
+func (e Endpoint) String() string {
+	host := "any"
+	if e.Addr != nil {
+		host = e.Addr.String()
+		if e.Addr.To4() == nil {
+			host = "[" + host + "]"
+		}
+	}
+	return fmt.Sprintf("%s:%d/%s", host, e.Port, e.Proto)
+}
+
+// VPNOpener is implemented by backends that can hold the lockdown while
+// letting a VPN client's handshake out. Optional, like Reporter and Checker:
+// a backend without it cannot hand over without a gap.
+type VPNOpener interface {
+	// AllowVPN replaces the lockdown with one that also passes traffic to
+	// the given endpoints, and nothing else. An empty list is a bare
+	// lockdown again. Legal only while locked down with no gap open.
+	AllowVPN(ctx context.Context, endpoints []Endpoint) error
+}
+
+// ==== holes for Portalguard's own checks ==================================
+// The re-probe and the certificate check have to reach addresses outside
+// the gap. Without this they are dropped like everything else.
+
+// Checker is implemented by backends that can let Portalguard's own checks
+// out while the gap is open, separately from the gap itself.
+//
+// Two checks need it. The re-probe that notices a finished login goes to the
+// probe endpoints, whose real addresses only appear once the portal stops
+// hijacking DNS - never in the gap. And a remembered host has to be reached
+// to have its certificate checked, before it is opened. Both were dropped by
+// the lockdown in every real run; only tests against loopback, which is
+// never filtered, ever saw them succeed.
+//
+// It is an optional capability, like Reporter: a backend without it simply
+// cannot run those checks, and the session falls back to what it did before.
+type Checker interface {
+	// AllowCheck lets traffic reach h's addresses on h's ports, with h
+	// treated as a check (h.Check is implied). Adding an address already
+	// allowed for a check is a no-op. Legal only while the gap is open.
+	AllowCheck(ctx context.Context, h Host) error
+	// DropCheck withdraws h's addresses from the check hole and kills any
+	// connection still open to them.
+	DropCheck(ctx context.Context, h Host) error
 }

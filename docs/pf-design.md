@@ -621,7 +621,7 @@ e.g. portmap or SecurityAgent
 
 This is not an error and does not indicate anything went wrong. pfctl prints it
 on any `-f`, including an anchor-scoped one that cannot touch the main ruleset.
-It is noted in the README so it is not mistaken for a failure.
+It is noted here so it is not mistaken for a failure.
 
 ---
 
@@ -800,8 +800,7 @@ thinking, which is the state you will be in when you need it.
 
 Where it is documented, so it can be found without this file:
 
-- **README.md**, in the "Failing safe" section at the end - the last thing on
-  the page.
+- **README.md**, in "If something goes wrong", near the top.
 - **`portalguard --help`**, as the closing line of the usage text.
 - **The Makefile**, as `make rescue`, with a comment.
 - Printed by `portalguard` itself whenever a release fails.

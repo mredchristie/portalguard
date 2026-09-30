@@ -45,3 +45,24 @@ func TestTraceKeepsOutputAndDNS(t *testing.T) {
 		t.Errorf("trace mode %v, want 0600: it holds real hostnames", st.Mode().Perm())
 	}
 }
+
+// TestGuideMadeBeforeTheTraceIsStillRecorded: run makes its guide before
+// -trace starts, and what the guide says must still land in the trace.
+func TestGuideMadeBeforeTheTraceIsStillRecorded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "trace.log")
+	g := &guide{out: stdout{}}
+	f := newFeed(stdout{})
+	tr, err := startTrace(path, []string{"run"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.stepf("Checking this network")
+	f.emit("start", nil)
+	tr.close()
+	data, _ := os.ReadFile(path)
+	for _, want := range []string{"out   1  Checking this network", `out   {"at":`} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("trace is missing %q:\n%s", want, data)
+		}
+	}
+}

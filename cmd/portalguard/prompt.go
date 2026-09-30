@@ -28,16 +28,28 @@ type allowPrompt struct {
 
 	mu      sync.Mutex
 	pending []string
+
+	// cancel, set for a GUI's -json run, ends the run and releases: on a
+	// "cancel" line, and when stdin ends because the app has gone.
+	cancel func(why string)
 }
 
 // newAllowPrompt starts reading answers from in, or returns nil when in is
 // not a terminal: piped input is a script, and a script's lines are not
 // answers to a question it never saw.
-func newAllowPrompt(ctx context.Context, sess *state.Session, in *os.File, out io.Writer) *allowPrompt {
-	if st, err := in.Stat(); err != nil || st.Mode()&os.ModeCharDevice == 0 {
+//
+// A feed (-json) is the exception: its stdin is a GUI's pipe, and every line
+// on it is an answer, so it is read whatever it is, and what the prompt says
+// goes down the feed as notes instead of onto a screen nobody sees.
+func newAllowPrompt(ctx context.Context, sess *state.Session, in *os.File, out io.Writer, g *guide) *allowPrompt {
+	fed := g != nil && g.feed != nil
+	if st, err := in.Stat(); !fed && (err != nil || st.Mode()&os.ModeCharDevice == 0) {
 		return nil
 	}
 	p := &allowPrompt{ctx: ctx, sess: sess, out: out}
+	if fed {
+		p.out = feedWriter{g}
+	}
 	go p.read(in)
 	return p
 }
@@ -50,6 +62,9 @@ func (p *allowPrompt) offer(names []string) {
 	p.mu.Lock()
 	p.pending = append([]string(nil), names...)
 	p.mu.Unlock()
+	if _, fed := p.out.(feedWriter); fed {
+		return // the suggest event already carries the names
+	}
 	fmt.Fprintln(p.out, "  Or type y and press Enter to open them from here.")
 }
 
@@ -58,11 +73,18 @@ func (p *allowPrompt) read(in io.Reader) {
 	for sc.Scan() {
 		p.answer(sc.Text())
 	}
+	if p.cancel != nil {
+		p.cancel("the app closed, so the network has been given back")
+	}
 }
 
 // answer acts on one line typed at the prompt.
 func (p *allowPrompt) answer(line string) {
 	a := strings.ToLower(strings.TrimSpace(line))
+	if a == "cancel" && p.cancel != nil {
+		p.cancel("cancelled from the app")
+		return
+	}
 	var names []string
 	switch {
 	case a == "y" || a == "yes":
@@ -104,4 +126,14 @@ func looksLikeHost(s string) bool {
 		}
 	}
 	return true
+}
+
+// feedWriter turns what the prompt says into note events.
+type feedWriter struct{ g *guide }
+
+func (w feedWriter) Write(b []byte) (int, error) {
+	if t := strings.TrimSpace(string(b)); t != "" {
+		w.g.emit("note", map[string]any{"text": t})
+	}
+	return len(b), nil
 }

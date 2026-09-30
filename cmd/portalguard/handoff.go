@@ -102,6 +102,7 @@ flags:
 // by `run`, which hands over by itself once it has sealed.
 func handOff(ctx context.Context, sess *state.Session, endpoints []firewall.Endpoint, wait time.Duration, g *guide) error {
 	chosen, starting := chosenVPN(ctx)
+	g.emit("waiting", map[string]any{"for": "vpn", "starting": chosen.Name, "timeout_seconds": wait.Seconds()})
 	if starting {
 		id := chosen.ID
 		sess.UseVPNConnect(func(ctx context.Context) error { return vpn.Start(ctx, id) })
@@ -137,6 +138,7 @@ func handOff(ctx context.Context, sess *state.Session, endpoints []firewall.Endp
 	}
 	// The rules are gone, so the session file describes nothing any more.
 	state.ClearSnapshot(state.SessionPath)
+	g.emit("vpn", map[string]any{"status": "up", "interface": res.Interface, "taken_over": res.TakenOver})
 	if g != nil {
 		g.sayf("Your VPN is up on %s.", res.Interface)
 		if res.TakenOver {

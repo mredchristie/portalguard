@@ -65,6 +65,7 @@ func armedDetect(ctx context.Context, sess *state.Session, g *guide, note func(s
 		return res, false, err
 	}
 	if next || !start.ready() {
+		g.emit("waiting", map[string]any{"for": "network", "timeout_seconds": wait.Seconds()})
 		g.sayf("Join the Wi-Fi now. Waiting up to %s...", wait)
 		if g == nil {
 			fmt.Printf("Armed: everything is blocked. Join the network now; waiting up to %s.\n", wait)
@@ -76,7 +77,7 @@ func armedDetect(ctx context.Context, sess *state.Session, g *guide, note func(s
 				break
 			}
 			if time.Now().After(deadline) {
-				return res, false, fmt.Errorf("no network joined within %s; the lockdown stays until you release it or it exits", wait)
+				return res, false, fmt.Errorf("no network joined within %s. The lockdown stays in place: sudo %s release to lift it", wait, invokedAs())
 			}
 			select {
 			case <-ctx.Done():
@@ -104,6 +105,7 @@ func armedDetect(ctx context.Context, sess *state.Session, g *guide, note func(s
 		if label == "" {
 			label = "a network you trust"
 		}
+		g.emit("trusted", map[string]any{"label": label, "gateway_mac": mac})
 		g.sayf("This is %s. PortalGuard has stood down.", label)
 		if g == nil {
 			fmt.Printf("Trusted network (%s): released.\n", label)

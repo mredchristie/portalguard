@@ -1,10 +1,13 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"portalguard/internal/state"
 )
@@ -20,9 +23,31 @@ import (
 // says only what actually happened: the same events a GUI would listen to.
 
 // guide narrates one run. A nil guide says nothing, which is -verbose.
+//
+// With a feed it is also the progress feed (-json): every event goes out as
+// one JSON object per line, for a GUI to read, and out is io.Discard. The
+// narration and the feed are the same calls, so they cannot drift apart.
 type guide struct {
 	out  io.Writer
 	step int
+
+	mu   sync.Mutex
+	feed *json.Encoder
+}
+
+// emit sends one event down the feed, if there is one. Every event has a
+// type and a time; the rest depends on the type. See docs/feed.md.
+func (g *guide) emit(typ string, fields map[string]any) {
+	if g == nil || g.feed == nil {
+		return
+	}
+	ev := map[string]any{"type": typ, "at": time.Now().UTC().Format(time.RFC3339Nano)}
+	for k, v := range fields {
+		ev[k] = v
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	_ = g.feed.Encode(ev)
 }
 
 func (g *guide) stepf(format string, args ...any) {
@@ -45,6 +70,7 @@ func (g *guide) transition(t state.Transition) {
 	if g == nil {
 		return
 	}
+	g.emit("transition", map[string]any{"from": t.From, "event": t.Event, "to": t.To, "note": t.Note})
 	switch t.Event {
 	case state.EventDetect:
 		g.stepf("Checking this network")
@@ -100,9 +126,20 @@ func (g *guide) summary(sess *state.Session) {
 			parts = append(parts, fmt.Sprintf("%d packets from other apps were held back", rep.BlockedOutPackets))
 		}
 	}
+	sum := map[string]any{}
+	if rep, ok := sess.Report(); ok && !rep.Empty() {
+		sum["gap_seconds"] = rep.GapDuration().Seconds()
+		sum["blocked_out_packets"] = rep.BlockedOutPackets
+	}
 	if st, ok := sess.DNSFilterStats(); ok {
 		parts = append(parts, fmt.Sprintf("%d lookups were refused on this Mac", st.Refused))
+		sum["lookups_refused"] = st.Refused
+		sum["lookups_forwarded"] = st.Forwarded
 	}
+	if auto := sess.AutoAllowed(); len(auto) > 0 {
+		sum["opened_automatically"] = auto
+	}
+	g.emit("summary", sum)
 	if len(parts) > 0 {
 		g.sayf("While you logged in: %s.", strings.Join(parts, ", "))
 		g.sayf("For the full report, run with -verbose.")
@@ -114,3 +151,18 @@ func isTerminal(f *os.File) bool {
 	st, err := f.Stat()
 	return err == nil && st.Mode()&os.ModeCharDevice != 0
 }
+
+// newFeed is a guide that says nothing on screen and reports every event as
+// JSON lines on w.
+func newFeed(w io.Writer) *guide {
+	return &guide{out: io.Discard, feed: json.NewEncoder(w)}
+}
+
+// stdout writes to whatever os.Stdout is at the moment of writing. The guide
+// is made before -trace swaps os.Stdout for the pipe that records it, and a
+// writer holding the original would write straight past the record: the
+// first -json preflight found the feed missing from its trace, and guided
+// steps were missing from every trace the same way.
+type stdout struct{}
+
+func (stdout) Write(b []byte) (int, error) { return os.Stdout.Write(b) }

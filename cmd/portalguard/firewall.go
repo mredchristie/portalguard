@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"portalguard/internal/firewall"
@@ -669,6 +670,7 @@ flags:
 		next = fs.Bool("next", false, "wait for the next network rather than checking the one this Mac is on now")
 		joinWait = fs.Duration("join-wait", 30*time.Minute, "how long to wait, armed, for a network to join")
 	}
+	asJSON := fs.Bool("json", false, "report progress as JSON lines on stdout instead of text, for a GUI; stdin then takes host names to open")
 	tracePath := fs.String("trace", "", "record everything this run prints, and every DNS query with what the filter did, timestamped, to this file (holds real hostnames)")
 	auditLog := fs.String("audit-log", "", "write the full, unredacted report to this file (never to stdout) - for verifying a -redact run against ground truth without displaying it")
 	if err := fs.Parse(args); err != nil {
@@ -678,8 +680,13 @@ flags:
 	// is: e2e and anything else that captures run's output reads the log.
 	// Decided before -trace swaps stdout for a pipe.
 	var g *guide
-	if !*verbose && isTerminal(os.Stdout) {
-		g = &guide{out: os.Stdout}
+	switch {
+	case *asJSON:
+		g = newFeed(stdout{})
+		quietLog = true
+		defer func() { quietLog = false }()
+	case !*verbose && isTerminal(os.Stdout):
+		g = &guide{out: stdout{}}
 		quietLog = true
 		defer func() { quietLog = false }()
 	}
@@ -687,6 +694,7 @@ flags:
 	note := func(format string, args ...any) {
 		logf(format, args...)
 		g.sayf("note: "+format, args...)
+		g.emit("note", map[string]any{"text": fmt.Sprintf(format, args...)})
 	}
 
 	// First, so a run that fails its preflight is on record too.
@@ -701,8 +709,9 @@ flags:
 		defer func() { activeTrace = nil }()
 	}
 	if g != nil {
-		fmt.Println("PortalGuard")
+		fmt.Fprintln(g.out, "PortalGuard")
 	}
+	g.emit("start", map[string]any{"command": name, "version": version})
 	// The VPN check comes before the root check on purpose: it is the more
 	// informative failure, and it is actionable without sudo.
 	if err := checkNoActiveVPN(ctx, *allowVPN); err != nil {
@@ -732,6 +741,14 @@ flags:
 		}
 	}
 
+	// A GUI drives a -json run through stdin: host names to open, and
+	// "cancel". Read from the start, so a cancel works while armed and
+	// waiting too, and so the app closing (stdin reaching its end) gives the
+	// network back rather than leave it locked with nothing in charge.
+	var prompt *allowPrompt
+	var appCancelled atomic.Bool
+	fed := g != nil && g.feed != nil
+
 	// From here on the firewall may be engaged, so the safety net matters.
 	safety := firewall.InstallSafetyNet(fw, logf)
 	defer safety.Stop()
@@ -745,6 +762,19 @@ flags:
 	// this run is about to open while this one sits waiting for the login.
 	sess.PersistTo(state.SessionPath)
 	sess.UseKnownNetworks(state.KnownNetworksPath)
+
+	if fed {
+		runCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		ctx = runCtx
+		prompt = newAllowPrompt(ctx, sess, os.Stdin, os.Stdout, g)
+		prompt.cancel = func(why string) {
+			if appCancelled.CompareAndSwap(false, true) {
+				g.emit("note", map[string]any{"text": why})
+				cancel()
+			}
+		}
+	}
 
 	err = firewall.Guard(fw, logf, func() error {
 		var res portal.Result
@@ -813,6 +843,7 @@ flags:
 			fmt.Printf("Opened automatically (known network, TLS verified): %s\n", strings.Join(opened, ", "))
 		}
 
+		g.emit("login_url", map[string]any{"url": res.PortalURL})
 		if g != nil {
 			g.sayf("If it does not open by itself: %s", res.PortalURL)
 		} else {
@@ -822,6 +853,7 @@ flags:
 		if err := openBrowser(res.PortalURL); err != nil {
 			note("could not open a browser automatically: %v", err)
 		}
+		g.emit("waiting", map[string]any{"for": "login", "timeout_seconds": wait.Seconds()})
 		if g != nil {
 			g.sayf("Waiting for you to finish (up to %s)...", *wait)
 		} else {
@@ -833,12 +865,17 @@ flags:
 		// for and not reached while the gap is still open and the user can
 		// still act on it. This opens nothing: it prints the command, and
 		// the person decides whether to run it.
-		prompt := newAllowPrompt(ctx, sess, os.Stdin, os.Stdout)
+		if prompt == nil {
+			prompt = newAllowPrompt(ctx, sess, os.Stdin, os.Stdout, g)
+		}
 		if prompt != nil && *verbose {
 			fmt.Println("Refused names are listed as they happen. Type one and press Enter to open it.")
 		}
 		sess.OnSuggestion(func(names []string) {
-			printSuggestion(names)
+			g.emit("suggest", map[string]any{"names": names})
+			if g == nil || g.feed == nil {
+				printSuggestion(names)
+			}
 			prompt.offer(names)
 		})
 
@@ -878,6 +915,7 @@ flags:
 		}
 
 		if *noHandoff {
+			g.emit("waiting", map[string]any{"for": "handoff"})
 			if g != nil {
 				g.stepf("Connect your VPN when you are ready")
 				g.sayf("Traffic stays blocked until then: sudo %s handoff, then connect it.", invokedAs())
@@ -888,8 +926,23 @@ flags:
 		}
 		return handOff(ctx, sess, endpoints, *handoffWait, g)
 	})
+	if appCancelled.Load() {
+		// Cancelled from the app: an error on the way out is the cancel
+		// itself, and the network goes back whatever state it was in.
+		rctx, rcancel := context.WithTimeout(context.Background(), 10*time.Second)
+		rerr := sess.Release(rctx)
+		rcancel()
+		if rerr != nil {
+			g.emit("error", map[string]any{"text": "cancelled, but releasing failed: " + rerr.Error()})
+			return fail(rerr)
+		}
+		g.emit("done", map[string]any{"state": sess.Machine().State(), "cancelled": true})
+		return exitOK
+	}
 	if err != nil {
+		g.emit("error", map[string]any{"text": hint(err).Error()})
 		return fail(hint(err))
 	}
+	g.emit("done", map[string]any{"state": sess.Machine().State()})
 	return exitOK
 }

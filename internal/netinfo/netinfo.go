@@ -161,3 +161,61 @@ func joinFailed(out string) error {
 	}
 	return fmt.Errorf("%s", strings.TrimSpace(first))
 }
+
+// ScopedResolver is a DNS server macOS knows for one interface.
+type ScopedResolver struct {
+	Addr      net.IP
+	Interface string // e.g. en0; empty if scutil named none
+}
+
+// parseSCUtilDNS reads `scutil --dns`: every resolver block's nameservers
+// and the interface it belongs to, skipping multicast DNS. It sees what
+// /etc/resolv.conf does not yet: a network that has been joined but not made
+// the primary one, which macOS holds back while it checks for a login page.
+//
+//	resolver #1
+//	  nameserver[0] : 86.189.0.94
+//	  if_index : 14 (en0)
+func parseSCUtilDNS(out string) []ScopedResolver {
+	var all []ScopedResolver
+	seen := map[string]bool{}
+	var addrs []net.IP
+	iface, mdns := "", false
+	flush := func() {
+		if !mdns {
+			for _, a := range addrs {
+				if !seen[a.String()] {
+					seen[a.String()] = true
+					all = append(all, ScopedResolver{Addr: a, Interface: iface})
+				}
+			}
+		}
+		addrs, iface, mdns = nil, "", false
+	}
+	for _, line := range strings.Split(out, "\n") {
+		t := strings.TrimSpace(line)
+		if strings.HasPrefix(t, "resolver #") || strings.HasPrefix(t, "DNS configuration") {
+			flush()
+			continue
+		}
+		k, v, ok := strings.Cut(t, ":")
+		if !ok {
+			continue
+		}
+		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+		switch {
+		case strings.HasPrefix(k, "nameserver["):
+			if ip := net.ParseIP(v); ip != nil {
+				addrs = append(addrs, ip)
+			}
+		case k == "if_index":
+			if i := strings.Index(v, "("); i >= 0 {
+				iface = strings.TrimSuffix(v[i+1:], ")")
+			}
+		case k == "options" && strings.Contains(v, "mdns"):
+			mdns = true
+		}
+	}
+	flush()
+	return all
+}

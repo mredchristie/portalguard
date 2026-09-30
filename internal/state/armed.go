@@ -11,6 +11,7 @@ import (
 
 	"portalguard/internal/dnsfilter"
 	"portalguard/internal/firewall"
+	"portalguard/internal/netinfo"
 	"portalguard/internal/portal"
 )
 
@@ -33,6 +34,13 @@ import (
 // ErrNoNetworkYet means there is nothing to detect through: no DNS server has
 // been handed out. The caller waits for a network and tries again.
 var ErrNoNetworkYet = errors.New("state: no network yet")
+
+// osCheckNames are what macOS's own login-page check resolves on the way to
+// captive.apple.com, which is a CNAME to Apple's servers. Let through with the
+// probe names: if macOS's check cannot finish, macOS holds the network back
+// from being the primary one, and the browser (which needs the primary
+// network) cannot load the login page. Found at EE WiFi, where it was refused.
+var osCheckNames = []string{"captive.g.aaplimg.com"}
 
 // hijackCheckSuffix is where the DNS hijack check's made-up names live. .invalid
 // is reserved (RFC 2606): no answer for it is real, so forwarding it gives
@@ -75,14 +83,35 @@ func (s *Session) DetectArmed(ctx context.Context) (portal.Result, error) {
 		return portal.Result{}, ErrNoNetworkYet
 	}
 
+	// Joined, but not yet the primary network: macOS holds that back while
+	// it checks for a login page, and its check cannot get out of the
+	// lockdown, so it waits for it to time out (41 seconds at EE WiFi). Until
+	// then there is no default route, only one scoped to the Wi-Fi
+	// interface. Detection binds to that interface and resolves through the
+	// filter directly, and does not wait; and once the probe names are
+	// answered, macOS's own check gets through too and stops waiting.
+	iface := scopedInterface(context.Background())
+	if iface != "" {
+		s.mu.Lock()
+		s.bindIface = iface
+		s.mu.Unlock()
+		s.logf("no default route yet: detecting through %s directly", iface)
+	}
+
 	opener := &probeOpener{s: s, probes: map[string]bool{}, resolve: map[string]bool{}}
 	for _, pr := range s.probes() {
 		if host, _, ok := probeTarget(pr); ok {
 			opener.probes[normalizeHost(host)] = true
 		}
 	}
+	for _, n := range osCheckNames {
+		opener.probes[n] = true
+	}
 	_ = os.Remove(DNSAllowPath)
 	srv := &dnsfilter.Server{Upstreams: upstreams, Policy: dnsfilter.NewPolicy(""), Auto: opener}
+	if iface != "" {
+		srv.UpstreamControl = netinfo.BindTo(iface)
+	}
 	if err := srv.Start(); err != nil {
 		return portal.Result{}, fmt.Errorf("detect armed: dns filter: %w", err)
 	}
@@ -111,6 +140,12 @@ func (s *Session) DetectArmed(ctx context.Context) (portal.Result, error) {
 
 	prev := s.prober.OnPortal
 	s.prober.OnPortal = opener.resolveOnly
+	if iface != "" {
+		// Kept for the rest of the session: the re-probe while the user
+		// logs in may still be before macOS makes the network primary.
+		s.prober.Control = netinfo.BindTo(iface)
+		s.prober.Resolver = filterResolver()
+	}
 	res := s.prober.Detect(ctx)
 	s.prober.OnPortal = prev
 
@@ -126,6 +161,30 @@ func (s *Session) DetectArmed(ctx context.Context) (portal.Result, error) {
 	}
 	_, err := s.machine.Apply(EventNoPortal, string(res.Class))
 	return res, err
+}
+
+// scopedInterface is the interface of the network's resolver when there is
+// no default route: a network joined but not yet primary. Empty when there is
+// a default route, and everything is left to the routing table as before.
+func scopedInterface(ctx context.Context) string {
+	if r, err := defaultRoute(ctx); err == nil && r.Gateway != nil {
+		return ""
+	}
+	for _, r := range scopedDNS(ctx) {
+		if r.Interface != "" && r.Addr.To4() != nil {
+			return r.Interface
+		}
+	}
+	return ""
+}
+
+// defaultRoute is netinfo.Default, swappable in tests.
+var defaultRoute = netinfo.Default
+
+func (s *Session) boundInterface() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.bindIface
 }
 
 // probeOpener is the DNS filter's AutoAllower during armed detection.

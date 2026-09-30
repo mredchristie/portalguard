@@ -9,6 +9,7 @@ import (
 	"net"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -125,4 +126,47 @@ func JoinWiFi(ctx context.Context, ssid, password string) error {
 		return fmt.Errorf("join %q: %w", ssid, err)
 	}
 	return nil
+}
+
+// ScopedDNS is every DNS server macOS knows, with the interface it belongs
+// to, from `scutil --dns`. See parseSCUtilDNS.
+func ScopedDNS(ctx context.Context) []ScopedResolver {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "/usr/sbin/scutil", "--dns").Output()
+	if err != nil {
+		return nil
+	}
+	return parseSCUtilDNS(string(out))
+}
+
+// ipBoundIf and ipv6BoundIf are Darwin's IP_BOUND_IF and IPV6_BOUND_IF.
+const (
+	ipBoundIf   = 25
+	ipv6BoundIf = 125
+)
+
+// BindTo returns a dialer or listener Control that sends a socket out of one
+// interface, whatever the routing table says. A network macOS has joined but
+// not yet made primary has no default route, only one scoped to its
+// interface, and a socket bound to that interface can use it.
+func BindTo(name string) func(network, address string, c syscall.RawConn) error {
+	return func(network, address string, c syscall.RawConn) error {
+		ifi, err := net.InterfaceByName(name)
+		if err != nil {
+			return err
+		}
+		var serr error
+		err = c.Control(func(fd uintptr) {
+			if strings.HasSuffix(network, "6") {
+				serr = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, ipv6BoundIf, ifi.Index)
+			} else {
+				serr = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, ipBoundIf, ifi.Index)
+			}
+		})
+		if err != nil {
+			return err
+		}
+		return serr
+	}
 }

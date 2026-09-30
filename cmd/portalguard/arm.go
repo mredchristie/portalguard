@@ -23,14 +23,33 @@ import (
 // lockdown, then the choice between standing down on a trusted network and
 // carrying on to the login or the VPN.
 
+// describe says what the network looks like, for the log.
+func (n network) describe() string {
+	gw := "none"
+	if n.gateway != nil {
+		gw = n.gateway.String()
+	} else if n.iface != "" {
+		gw = "none yet (reachable through " + n.iface + ")"
+	}
+	dns := "none"
+	if len(n.resolvers) > 0 {
+		dns = strings.Join(n.resolvers, ", ")
+	}
+	return fmt.Sprintf("gateway %s, DNS %s", gw, dns)
+}
+
 // network is what identifies the network this Mac is on, for noticing a join.
 type network struct {
 	gateway   net.IP
 	resolvers []string
+	// iface is the resolver's interface when there is no gateway yet: a
+	// network macOS has joined and not yet made primary. Detection can work
+	// through it (see state.DetectArmed), so it does not wait for macOS.
+	iface string
 }
 
 func (n network) ready() bool {
-	if n.gateway == nil {
+	if n.gateway == nil && n.iface == "" {
 		return false
 	}
 	for _, r := range n.resolvers {
@@ -54,6 +73,14 @@ func currentNetwork(ctx context.Context) network {
 		n.resolvers = append(n.resolvers, ip.String())
 	}
 	sort.Strings(n.resolvers)
+	if n.gateway == nil {
+		for _, r := range netinfo.ScopedDNS(ctx) {
+			if r.Interface != "" && r.Addr.To4() != nil {
+				n.iface = r.Interface
+				break
+			}
+		}
+	}
 	return n
 }
 
@@ -92,6 +119,8 @@ func armedDetect(ctx context.Context, sess *state.Session, g *guide, note func(s
 		}
 		g.emit("joining", map[string]any{"ssid": join.ssid})
 		g.sayf("Joining %s...", join.ssid)
+		logf("joining %q (was on %s)", join.ssid, start.describe())
+		askedAt := time.Now()
 		if err := netinfo.JoinWiFi(ctx, join.ssid, password); err != nil {
 			// Nothing was joined, so there is nothing to protect: give the
 			// network back rather than leave the Mac locked with nowhere to go.
@@ -101,6 +130,7 @@ func armedDetect(ctx context.Context, sess *state.Session, g *guide, note func(s
 			return res, true, fmt.Errorf("%v. PortalGuard has stood down, so this Mac is back on the network it was on", err)
 		}
 		joined = time.Now()
+		logf("macOS joined %q in %s", join.ssid, joined.Sub(askedAt).Round(100*time.Millisecond))
 	}
 	if next || !start.ready() || join.ssid != "" {
 		g.emit("waiting", map[string]any{"for": "network", "timeout_seconds": wait.Seconds()})
@@ -128,7 +158,19 @@ func armedDetect(ctx context.Context, sess *state.Session, g *guide, note func(s
 			}
 		}
 		deadline := time.Now().Add(wait)
-		for !on(currentNetwork(ctx)) {
+		// Every change is logged, and the state every ten seconds: a join that
+		// never produces a usable network (the first EE attempt sat here in
+		// silence) must say what it is waiting for.
+		last, lastLog := "", time.Time{}
+		for {
+			cur := currentNetwork(ctx)
+			if d := cur.describe(); d != last || time.Since(lastLog) > 10*time.Second {
+				logf("network: %s", d)
+				last, lastLog = d, time.Now()
+			}
+			if on(cur) {
+				break
+			}
 			if time.Now().After(deadline) {
 				return res, false, fmt.Errorf("no network joined within %s. The lockdown stays in place: sudo %s release to lift it", wait, invokedAs())
 			}

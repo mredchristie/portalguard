@@ -1,6 +1,7 @@
 package netinfo
 
 import (
+	"net"
 	"strings"
 	"testing"
 )
@@ -77,5 +78,43 @@ func TestJoinFailedSaysWhatToDo(t *testing.T) {
 	err := joinFailed(out)
 	if err == nil || !strings.Contains(err.Error(), "needs its password") || strings.Count(err.Error(), "HomeWiFi") > 1 {
 		t.Errorf("joinFailed = %v", err)
+	}
+}
+
+// TestParseSCUtilDNS: the EE network, joined but not yet primary. Its
+// resolver is known here while /etc/resolv.conf is still empty.
+func TestParseSCUtilDNS(t *testing.T) {
+	out := `DNS configuration
+
+resolver #1
+  domain   : local
+  options  : mdns
+  timeout  : 5
+  flags    : Request A records
+  reach    : 0x00000000 (Not Reachable)
+  order    : 300000
+
+DNS configuration (for scoped queries)
+
+resolver #1
+  nameserver[0] : 86.189.0.94
+  if_index : 14 (en0)
+  flags    : Scoped, Request A records
+  reach    : 0x00020002 (Reachable,Directly Reachable Address)
+
+resolver #2
+  nameserver[0] : 86.189.0.94
+  nameserver[1] : fd00::1
+  if_index : 14 (en0)
+`
+	got := parseSCUtilDNS(out)
+	if len(got) != 2 {
+		t.Fatalf("got %+v", got)
+	}
+	if !got[0].Addr.Equal(net.ParseIP("86.189.0.94")) || got[0].Interface != "en0" {
+		t.Errorf("first resolver = %+v", got[0])
+	}
+	if got[1].Addr.String() != "fd00::1" {
+		t.Errorf("second resolver = %+v", got[1])
 	}
 }

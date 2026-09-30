@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"syscall"
 )
 
 // ErrUnsupported is returned on platforms where route inspection is not
@@ -24,3 +25,9 @@ func GatewayMAC(context.Context, net.IP) (string, error) { return "", ErrUnsuppo
 
 // JoinWiFi is not implemented off macOS.
 func JoinWiFi(context.Context, string, string) error { return ErrUnsupported }
+
+// ScopedDNS is not implemented off macOS.
+func ScopedDNS(context.Context) []ScopedResolver { return nil }
+
+// BindTo is not implemented off macOS: sockets use the routing table.
+func BindTo(string) func(network, address string, c syscall.RawConn) error { return nil }

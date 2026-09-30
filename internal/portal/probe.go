@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 )
@@ -88,6 +89,10 @@ type Prober struct {
 	// it, before it is resolved and pinned. Detection through a lockdown
 	// uses it to let exactly that lookup through its filter.
 	OnPortal func(host string)
+	// Control, if set, is applied to every connection the probes make: how
+	// detection binds them to the Wi-Fi interface when macOS has joined a
+	// network but not yet given it a default route.
+	Control func(network, address string, c syscall.RawConn) error
 }
 
 // NewProber returns a Prober with sensible defaults.
@@ -303,7 +308,7 @@ func (p *Prober) runProbe(ctx context.Context, probe Probe) ProbeResult {
 // and redirects surfaced rather than followed, because the redirect target is
 // exactly what we are looking for.
 func (p *Prober) client() *http.Client {
-	dialer := &net.Dialer{Timeout: p.timeout(), Resolver: p.resolver()}
+	dialer := &net.Dialer{Timeout: p.timeout(), Resolver: p.resolver(), Control: p.Control}
 	return &http.Client{
 		Timeout: p.timeout(),
 		CheckRedirect: func(*http.Request, []*http.Request) error {

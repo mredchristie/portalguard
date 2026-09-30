@@ -14,6 +14,7 @@ import (
 
 	"portalguard/internal/dnsfilter"
 	"portalguard/internal/firewall"
+	"portalguard/internal/netinfo"
 	"portalguard/internal/portal"
 )
 
@@ -71,6 +72,11 @@ type Session struct {
 	// vpnConnect, if set, starts the user's VPN once the handover's hole is
 	// open. See UseVPNConnect.
 	vpnConnect func(context.Context) error
+
+	// bindIface is the interface detection bound its connections to, when the
+	// network had no default route yet; the login's DNS filter does the
+	// same. Empty otherwise. See armed.go, scopedInterface.
+	bindIface string
 
 	// gapMu is held across AllowExtra's check-and-open and across Seal and
 	// Release, so a host added from inside this process (the prompt) can
@@ -638,7 +644,11 @@ func splitHostPort(spec string) (host string, port int) {
 // the user on, which is the only signal we trust: we never read the portal's
 // own "you are logged in" page.
 func (s *Session) CheckAuth(ctx context.Context) (bool, error) {
-	res := s.prober.Detect(ctx)
+	// The DNS tampering check has done its job once the portal is known: on
+	// every re-check it only adds a made-up name for the filter to refuse.
+	p := *s.prober
+	p.SkipDNSCheck = true
+	res := p.Detect(ctx)
 	s.mu.Lock()
 	s.last = res
 	s.mu.Unlock()
@@ -895,7 +905,25 @@ func parseIPs(ss []string) []net.IP {
 // network's resolvers, which the DNS filter forwards to.
 func SystemResolvers() []net.IP { return systemResolvers() }
 
+// systemResolvers reads /etc/resolv.conf, and when that is empty, macOS's
+// live settings: a network joined but not yet made primary (macOS holds it
+// back while it checks for a login page) has its resolver there and nowhere
+// else. The first EE WiFi run waited 41 seconds on an empty resolv.conf.
 func systemResolvers() []net.IP {
+	if rs := resolvConf(); len(rs) > 0 {
+		return rs
+	}
+	var out []net.IP
+	for _, r := range scopedDNS(context.Background()) {
+		out = append(out, r.Addr)
+	}
+	return out
+}
+
+// scopedDNS is netinfo.ScopedDNS, swappable in tests.
+var scopedDNS = netinfo.ScopedDNS
+
+func resolvConf() []net.IP {
 	f, err := os.Open("/etc/resolv.conf")
 	if err != nil {
 		return nil

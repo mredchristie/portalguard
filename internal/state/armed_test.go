@@ -2,9 +2,11 @@ package state
 
 import (
 	"context"
+	"errors"
 	"net"
 	"testing"
 
+	"portalguard/internal/netinfo"
 	"portalguard/internal/portal"
 )
 
@@ -93,3 +95,31 @@ func TestProbeOpenerLetsOnlyDetectionThrough(t *testing.T) {
 
 // Detection through the lockdown needs a prober hook; this pins its contract.
 var _ = portal.Prober{OnPortal: func(string) {}}
+
+// TestScopedInterfaceOnlyWithoutADefaultRoute: detection binds to the Wi-Fi
+// interface only in the window where macOS has joined a network and not yet
+// given it a default route; with a route, everything is as it always was.
+func TestScopedInterfaceOnlyWithoutADefaultRoute(t *testing.T) {
+	origRoute, origDNS := defaultRoute, scopedDNS
+	t.Cleanup(func() { defaultRoute, scopedDNS = origRoute, origDNS })
+	scopedDNS = func(context.Context) []netinfo.ScopedResolver {
+		return []netinfo.ScopedResolver{
+			{Addr: net.ParseIP("fd00::1"), Interface: "en0"},
+			{Addr: net.ParseIP("86.189.0.94"), Interface: "en0"},
+		}
+	}
+
+	defaultRoute = func(context.Context) (netinfo.DefaultRoute, error) {
+		return netinfo.DefaultRoute{}, errors.New("not in table")
+	}
+	if got := scopedInterface(context.Background()); got != "en0" {
+		t.Errorf("no default route: %q, want en0", got)
+	}
+
+	defaultRoute = func(context.Context) (netinfo.DefaultRoute, error) {
+		return netinfo.DefaultRoute{Interface: "en0", Gateway: net.ParseIP("100.95.0.1")}, nil
+	}
+	if got := scopedInterface(context.Background()); got != "" {
+		t.Errorf("with a default route: %q, want nothing bound", got)
+	}
+}

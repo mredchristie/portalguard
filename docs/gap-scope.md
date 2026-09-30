@@ -275,6 +275,48 @@ exactly one entry, BT Wi-Fi, because it is the only network this project has
 actually diagnosed by hand - see the case above. Every other provider a user
 encounters accrues the same way: `allow`, then `remember`, once.
 
+### F. The portal's own site, opened as it is asked for
+
+**Built, and proven against the off-box hotspot** (`make hotspot-auto`): the
+page rendered first time with no `allow`, a lookalike domain was refused, and
+the network's resolver heard nothing beyond the login's own names. Without
+the filter, the fallback opened the same hosts from pf's log. C with the
+parts that sank it taken out. A+ and E still left a first visit to every new network as a blank page
+and a command to type, and a tool meant for people who do not live in a
+terminal cannot ask that of them.
+
+When the DNS filter is asked for a name on the portal's own site
+(`cdn.btwifi.com` for `www.btwifi.com`), it forwards the query, pins the
+addresses in the answer on 80 and 443, and only then replies. By the time the
+browser has an address, it can reach it. The page renders first time.
+
+What C gave away, and what F keeps:
+
+- **The operator choosing addresses.** It already does. The portal host's own
+  address comes from the same DNS, and the gap has always trusted it. F adds
+  more of the same, from the same answerer, for names the page itself asked
+  for. Each is pinned when answered, so a later answer cannot move it.
+- **A background daemon reaching them.** C's real harm, and the DNS filter is
+  what removes it: nothing else on the machine can look anything up, so
+  nothing else learns an address to try. A daemon would have to already hold
+  an address the operator chose to reuse, and then reach it on 80 or 443 only.
+- **An unbounded gap.** Bounded now: only names something actually asked for,
+  only on the portal's site, at most 10, only while the gap is open. The seal
+  closes auto-allow before it closes the gap, so a late answer cannot reopen it.
+- **No public suffix list.** Still none. `siteOf` knows the `co.uk` family,
+  and a list of shared hosting domains (`cloudfront.net`, `github.io`,
+  `herokuapp.com` and so on) turns auto-allow off for a portal on one. A suffix
+  missing from both means the page's same-site hosts are other customers' as
+  well. That is the known gap in this option, and the cap and the
+  asked-for-only rule are what bound it.
+
+Where it cannot decide, it does nothing, and A+ and `allow` work as before:
+an IP-only portal, a portal on shared hosting, a host on another domain (a
+payment page). A host it fails to open is refused like any other and
+suggested. With no DNS filter it falls back to pf's log, which sees a name
+after the browser's first try has failed, so it asks for a reload.
+`-no-auto-allow` is exactly v0.3.
+
 ## The decision
 
 **A+ shipped, then E, then B in v0.2.** Keep the gap decided by a human
@@ -293,7 +335,9 @@ it has not yet met a real portal that chains. Neither has met a hostile network:
 cooperates, and a real rogue access point meeting the TLS check is still
 untested.
 
-**C is rejected**, and E is not a rediscovery of it: E answers the same case
+**C is rejected as written**, and F is what survives of it once the DNS
+filter exists: the filter is what stops the operator's answers reaching
+anything but the login page. E is not a rediscovery of C: E answers the same case
 C was reaching for by proving identity cryptographically instead of trusting
 DNS, which is exactly the property C was rejected for lacking. **D is held**
 pending evidence that A+ and E together are not enough.
@@ -302,7 +346,9 @@ The general principle, which is worth stating because it decides the next case
 too: *Portalguard should get better at telling you what is blocked, not at
 guessing what to unblock.* Every option that widens the gap automatically has
 to be argued against the possibility of a portal choosing what goes in it. An
-option that only improves what the user is told does not.
+option that only improves what the user is told does not. F is the one
+automatic widening argued that way, above; anything off the portal's site is
+still the user's call.
 
 ## Related
 

@@ -4,6 +4,7 @@ package pf
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -280,6 +281,52 @@ func ReloadPfConf(ctx context.Context) error {
 	}
 	if _, err := b.pfctl(ctx, "-f", PfConfPath); err != nil {
 		return fmt.Errorf("load %s: %w", PfConfPath, err)
+	}
+	return nil
+}
+
+// LoopbackSkipped reports whether pf is skipping lo0, which stops the DNS
+// filter's redirect. See ErrLoopbackSkipped.
+func LoopbackSkipped(ctx context.Context) bool {
+	b := New()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.loopbackSkipped(ctx)
+}
+
+// ErrEngaged means portalguard's own rules are loaded, so a full flush would
+// throw away a lockdown that is in use.
+var ErrEngaged = errors.New("portalguard's rules are loaded; run `sudo portalguard release` first")
+
+// ClearLoopbackSkip removes a `set skip on lo0` that another tool set at
+// runtime, and loads /etc/pf.conf again.
+//
+// Reloading pf.conf alone does not do it: pf keeps an interface's skip flag
+// across a reload that does not mention it, which is how NordVPN's survives
+// long after it disconnects. Only a full flush clears interface flags, and it
+// takes everything else loaded with it, which is why it refuses while
+// portalguard itself is engaged. Established connections may need to
+// reconnect afterwards.
+func ClearLoopbackSkip(ctx context.Context) error {
+	b := New()
+	if _, err := b.pfctl(ctx, "-n", "-f", PfConfPath); err != nil {
+		return fmt.Errorf("%s did not parse, so nothing was changed: %w", PfConfPath, err)
+	}
+	// Status, not a bare `-s rules`: pfctl's chatter on stderr would read as
+	// rules and refuse forever.
+	if st, err := b.Status(ctx); err != nil {
+		return fmt.Errorf("could not tell whether portalguard is engaged, so nothing was changed: %w", err)
+	} else if st.Managed {
+		return ErrEngaged
+	}
+	if _, err := b.pfctl(ctx, "-F", "all"); err != nil {
+		return fmt.Errorf("flush pf: %w", err)
+	}
+	if _, err := b.pfctl(ctx, "-f", PfConfPath); err != nil {
+		return fmt.Errorf("load %s after the flush: %w", PfConfPath, err)
+	}
+	if LoopbackSkipped(ctx) {
+		return errors.New("pf still skips lo0 after a flush and reload; something is setting it again (is the VPN app still running?). a reboot clears it")
 	}
 	return nil
 }

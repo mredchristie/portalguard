@@ -22,6 +22,19 @@ func runInstallAnchor(ctx context.Context, args []string) int {
 		return fail(err)
 	}
 	installed, _ := pf.AnchorInstalled()
+	skipped := pf.LoopbackSkipped(ctx)
+	if installed && skipped {
+		// The hooks may be loaded and still useless to the DNS filter: a
+		// runtime `set skip on lo0` survives a plain reload of pf.conf.
+		if err := pf.ClearLoopbackSkip(ctx); err != nil {
+			return fail(err)
+		}
+		fmt.Println("pf was skipping loopback. Internet Sharing sets that (Apple's container tool and")
+		fmt.Println("some VMs start it), and NordVPN's kill switch leaves it behind.")
+		fmt.Printf("pf has been flushed and %s loaded again, so the DNS filter can run.\n", pf.PfConfPath)
+		fmt.Println("open connections may need a moment to reconnect.")
+		return exitOK
+	}
 	if installed && pf.HooksLoaded(ctx) {
 		fmt.Printf("already installed: %s references the portalguard anchors, and pf has them loaded\n", pf.PfConfPath)
 		return exitOK

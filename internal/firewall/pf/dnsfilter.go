@@ -19,7 +19,7 @@ var ErrNoRdrHook = errors.New(`pf: /etc/pf.conf has no rdr-anchor "portalguard" 
 // Stock macOS does not set it. NordVPN's kill switch does: confirmed live,
 // connecting and disconnecting it left `lo0 (skip)` behind, along with a main
 // ruleset that no longer reached Portalguard's anchors.
-var ErrLoopbackSkipped = errors.New("pf: the loaded ruleset skips loopback (set skip on lo0), so DNS cannot be redirected to the filter; a VPN kill switch left it behind (NordVPN does); with the VPN disconnected, `sudo portalguard install-anchor` restores pf's own rules")
+var ErrLoopbackSkipped = errors.New("pf: the loaded ruleset skips loopback (set skip on lo0), so DNS cannot be redirected to the filter; Internet Sharing sets it (Apple's container tool and some VMs start that), and NordVPN's kill switch leaves it behind; `sudo portalguard install-anchor` clears it")
 
 // UseDNSFilter makes every gap loaded from now on send its DNS through
 // Portalguard's resolver. It refuses, changing nothing, when the rdr hook is

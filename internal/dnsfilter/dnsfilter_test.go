@@ -2,6 +2,7 @@ package dnsfilter
 
 import (
 	"encoding/binary"
+	"errors"
 	"net"
 	"path/filepath"
 	"strings"
@@ -166,5 +167,126 @@ func TestPolicyIgnoresAddressesAndBlanks(t *testing.T) {
 	}
 	if !p.Allowed("portal.example") {
 		t.Error("names are not normalised")
+	}
+}
+
+// fakeAuto wants the names in wants, and records what it was asked to open.
+type fakeAuto struct {
+	wants  map[string]bool
+	fail   error
+	opened chan []net.IP
+}
+
+func (f *fakeAuto) Wants(name string) bool { return f.wants[name] }
+
+func (f *fakeAuto) Open(name string, addrs []net.IP) error {
+	if f.fail != nil {
+		return f.fail
+	}
+	f.opened <- addrs
+	return nil
+}
+
+func startAutoFilter(t *testing.T, up *fakeUpstream, auto *fakeAuto) *Server {
+	t.Helper()
+	s := &Server{
+		Upstreams:          []net.IP{net.IPv4(127, 0, 0, 1)},
+		Policy:             NewPolicy("", "www.guestwifi.test"),
+		Auto:               auto,
+		ListenAddr:         "127.0.0.1:0",
+		UpstreamSourcePort: -1,
+		upstreamDst:        up.conn.LocalAddr().(*net.UDPAddr).Port,
+	}
+	if err := s.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Stop)
+	return s
+}
+
+// TestAutoAllowOpensBeforeReplying: a name Auto wants is forwarded, and its
+// addresses are opened before the client hears the answer.
+func TestAutoAllowOpensBeforeReplying(t *testing.T) {
+	up := newFakeUpstream(t)
+	auto := &fakeAuto{wants: map[string]bool{"cdn.guestwifi.test": true}, opened: make(chan []net.IP, 1)}
+	s := startAutoFilter(t, up, auto)
+
+	r := ask(t, s, 0x4242, "cdn.guestwifi.test")
+	if rcode(r) != 0 {
+		t.Fatalf("rcode %d, want an answer", rcode(r))
+	}
+	select {
+	case addrs := <-auto.opened:
+		if len(addrs) != 1 || !addrs[0].Equal(net.IPv4(198, 51, 100, 7)) {
+			t.Fatalf("opened %v, want 198.51.100.7", addrs)
+		}
+	default:
+		t.Fatal("the reply came back before the address was opened")
+	}
+	if got := s.AutoAllowed(); len(got) != 1 || got[0] != "cdn.guestwifi.test" {
+		t.Fatalf("AutoAllowed = %v", got)
+	}
+}
+
+// TestAutoAllowFailureIsARefusal: if the firewall cannot be opened, the
+// client is refused, exactly as without auto-allow, and the name is on the
+// refused list for the suggestion.
+func TestAutoAllowFailureIsARefusal(t *testing.T) {
+	up := newFakeUpstream(t)
+	auto := &fakeAuto{wants: map[string]bool{"cdn.guestwifi.test": true}, fail: errors.New("pf said no")}
+	s := startAutoFilter(t, up, auto)
+
+	if r := ask(t, s, 1, "cdn.guestwifi.test"); rcode(r) != 5 {
+		t.Fatalf("rcode %d, want REFUSED", rcode(r))
+	}
+	if got := s.Refused(); len(got) != 1 || got[0] != "cdn.guestwifi.test" {
+		t.Fatalf("Refused = %v", got)
+	}
+	if len(s.AutoAllowed()) != 0 {
+		t.Fatal("a failed open counted as auto-allowed")
+	}
+}
+
+// TestAutoAllowLeavesOtherNamesRefused: names Auto does not want never leave.
+func TestAutoAllowLeavesOtherNamesRefused(t *testing.T) {
+	up := newFakeUpstream(t)
+	auto := &fakeAuto{wants: map[string]bool{"cdn.guestwifi.test": true}, opened: make(chan []net.IP, 1)}
+	s := startAutoFilter(t, up, auto)
+
+	if r := ask(t, s, 1, "imap.mail.me.com"); rcode(r) != 5 {
+		t.Fatalf("rcode %d, want REFUSED", rcode(r))
+	}
+	select {
+	case n := <-up.asked:
+		t.Fatalf("%s reached the upstream", n)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// TestAnswerAddrsFollowsCNAMEs: a CNAME to a CDN ends in the CDN's
+// addresses, and those are what the client connects to.
+func TestAnswerAddrsFollowsCNAMEs(t *testing.T) {
+	r := reply(query(1, "cdn.btwifi.com"), 0)
+	binary.BigEndian.PutUint16(r[6:8], 3)
+	// cdn.btwifi.com CNAME d1.cloudfront.net
+	target := []byte{2, 'd', '1', 10, 'c', 'l', 'o', 'u', 'd', 'f', 'r', 'o', 'n', 't', 3, 'n', 'e', 't', 0}
+	r = append(r, 0xC0, 0x0C, 0, 5, 0, 1, 0, 0, 0, 60, 0, byte(len(target)))
+	cname := len(r)
+	r = append(r, target...)
+	// d1.cloudfront.net A 203.0.113.9, and AAAA 2001:db8::9
+	r = append(r, 0xC0|byte(cname>>8), byte(cname), 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 203, 0, 113, 9)
+	v6 := net.ParseIP("2001:db8::9")
+	r = append(r, 0xC0|byte(cname>>8), byte(cname), 0, 28, 0, 1, 0, 0, 0, 60, 0, 16)
+	r = append(r, v6...)
+
+	got := answerAddrs(r)
+	if len(got) != 2 || !got[0].Equal(net.IPv4(203, 0, 113, 9)) || !got[1].Equal(v6) {
+		t.Fatalf("answerAddrs = %v", got)
+	}
+	if answerAddrs(r[:len(r)-3]) == nil {
+		t.Fatal("a truncated reply should still yield the records before the cut")
+	}
+	if answerAddrs(refusal(query(1, "x.test"))) != nil {
+		t.Fatal("a refusal has no addresses")
 	}
 }

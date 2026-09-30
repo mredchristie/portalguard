@@ -68,6 +68,8 @@ func (s *Session) StartDNSFilter(ctx context.Context) error {
 	s.mu.Lock()
 	res := s.last
 	knownPath := s.knownPath
+	autoOn := s.autoOn
+	verbose := s.dnsVerbose
 	s.mu.Unlock()
 
 	names := []string{res.PortalHost}
@@ -94,6 +96,15 @@ func (s *Session) StartDNSFilter(ctx context.Context) error {
 		Upstreams: upstreams,
 		Policy:    dnsfilter.NewPolicy(DNSAllowPath, names...),
 	}
+	if verbose {
+		srv.Logf = s.logf
+	}
+	var auto *autoAllow
+	site := autoAllowSite(res.PortalHost)
+	if autoOn && site != "" {
+		auto = newAutoAllow(s, site)
+		srv.Auto = auto
+	}
 	if err := srv.Start(); err != nil {
 		return err
 	}
@@ -103,9 +114,24 @@ func (s *Session) StartDNSFilter(ctx context.Context) error {
 	}
 	s.mu.Lock()
 	s.dns = srv
+	s.auto = auto
 	s.mu.Unlock()
 	s.logf("dns filter: only the login's names will leave; everything else is refused")
+	switch {
+	case auto != nil:
+		s.logf("auto-allow: hosts on %s open as the login page asks for them", site)
+	case autoOn:
+		s.logf("auto-allow: off for this portal (no site of its own to trust); missing hosts will be suggested")
+	}
 	return nil
+}
+
+// UseVerboseDNS has the filter log each name the first time it is refused.
+// Takes effect at StartDNSFilter.
+func (s *Session) UseVerboseDNS(on bool) {
+	s.mu.Lock()
+	s.dnsVerbose = on
+	s.mu.Unlock()
 }
 
 // stopDNSFilter stops the resolver, if one is running, and returns what it

@@ -44,6 +44,12 @@ start() {
 
 up() {
     command -v container >/dev/null || { echo "needs Apple's container tool: brew install container"; exit 64; }
+    # The service does not survive a reboot, and without it every container
+    # command fails with an XPC error that does not say why.
+    if ! container system status >/dev/null 2>&1; then
+        echo "starting the container service..."
+        container system start || { echo "could not start it. run: container system start"; exit 64; }
+    fi
     mkdir -p "$DIR"
     GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o "$DIR/hotspot" ./testenv/hotspot
 

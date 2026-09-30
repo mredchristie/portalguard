@@ -513,8 +513,8 @@ func sessionLine(st firewall.Status) string {
 // into a bug report, or a screen recording. The default is full detail, for
 // local use.
 //
-// verbose, when true and process attribution backed off, additionally
-// prints why. That detail (rep.ProcessNote) is diagnostic - which of the
+// verbose, when true, also lists every name the DNS filter refused, and if
+// process attribution backed off, prints why. That detail (rep.ProcessNote) is diagnostic - which of the
 // two ways the raw pflog path can fail, and the specific bytes involved -
 // not something a normal user needs, so it stays out of the report unless
 // asked for.
@@ -563,6 +563,15 @@ func printReport(sess *state.Session, redact, verbose bool, auditLog string) {
 			fmt.Printf(": %s", strings.Join(st.ForwardedNames, ", "))
 		}
 		fmt.Println(".")
+		if auto := sess.AutoAllowed(); len(auto) > 0 && !redact {
+			fmt.Printf("Opened automatically as the login page asked for them: %s.\n", strings.Join(auto, ", "))
+		}
+		// Everything refused, not just the portal's own site: a login that
+		// hands off to a payment page on another domain shows up here, and
+		// nowhere else, when the page just sits there.
+		if verbose && !redact && len(st.RefusedNames) > 0 {
+			fmt.Printf("Refused: %s.\n", strings.Join(st.RefusedNames, ", "))
+		}
 	}
 	fmt.Println("---")
 	if verbose && rep.ProcessNote != "" {
@@ -613,11 +622,12 @@ flags:
 	poll := fs.Duration("poll", 3*time.Second, "how often to re-probe while waiting")
 	allowVPN := vpnFlag(fs)
 	redact := fs.Bool("redact", false, "generalise hostnames in the leak report to categories, for output you plan to share")
-	verbose := fs.Bool("verbose", false, "if process attribution backs off, print why (diagnostic; not shown by default)")
+	verbose := fs.Bool("verbose", false, "list every name refused during the gap, not only the portal's own, and why process attribution backed off if it did")
 	var vpns endpointFlags
 	fs.Var(&vpns, "vpn", vpnFlagHelp)
 	noHandoff := fs.Bool("no-handoff", false, "stop at SEALED instead of handing over to your VPN")
 	noDNSFilter := fs.Bool("no-dns-filter", false, "let the gap's DNS go straight to the network's resolver, for every app, as v0.2 did")
+	noAutoAllow := fs.Bool("no-auto-allow", false, "never open the portal's own hosts automatically; suggest them for allow instead, as v0.3 did")
 	handoffWait := fs.Duration("handoff-wait", 3*time.Minute, "how long to wait for the VPN tunnel after sealing")
 	auditLog := fs.String("audit-log", "", "write the full, unredacted report to this file (never to stdout) - for verifying a -redact run against ground truth without displaying it")
 	if err := fs.Parse(args); err != nil {
@@ -668,6 +678,10 @@ flags:
 		}
 		// Before the gap, so its rules carry the filter from the first load.
 		// Without it the gap still works, with the machine-wide DNS hole.
+		// The portal's own site opens as the page asks for it: through the
+		// filter when it runs, from pf's log when it does not.
+		sess.UseAutoAllow(!*noAutoAllow)
+		sess.UseVerboseDNS(*verbose)
 		if !*noDNSFilter {
 			if err := sess.StartDNSFilter(ctx); err != nil {
 				logf("dns filter off, so every app's lookups can reach the network during the gap: %v", err)
@@ -698,7 +712,14 @@ flags:
 		// for and not reached while the gap is still open and the user can
 		// still act on it. This opens nothing: it prints the command, and
 		// the person decides whether to run it.
-		sess.OnSuggestion(func(names []string) { printSuggestion(names) })
+		prompt := newAllowPrompt(ctx, sess, os.Stdin, os.Stdout)
+		if prompt != nil && *verbose {
+			fmt.Println("Refused names are listed as they happen. Type one and press Enter to open it.")
+		}
+		sess.OnSuggestion(func(names []string) {
+			printSuggestion(names)
+			prompt.offer(names)
+		})
 
 		waitCtx, cancel := context.WithTimeout(ctx, *wait)
 		defer cancel()

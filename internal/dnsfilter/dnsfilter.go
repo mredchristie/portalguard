@@ -147,6 +147,9 @@ type Server struct {
 	Policy    *Policy
 	// Logf, if set, is told about each refusal the first time a name is seen.
 	Logf func(format string, args ...any)
+	// Auto, if set, is asked about names the policy does not list, and can
+	// have them forwarded and opened as they are asked for. See AutoAllower.
+	Auto AutoAllower
 
 	// ListenAddr and UpstreamSourcePort default to the fixed ports the pf
 	// rules name. They are settable so tests can run without those ports
@@ -168,7 +171,21 @@ type Server struct {
 	pending   map[uint16]chan []byte
 	refused   map[string]int
 	forwarded map[string]int
+	auto      map[string]int
 	wg        sync.WaitGroup
+}
+
+// AutoAllower opens a name the policy does not list, at the moment it is
+// asked for, rather than refusing it and waiting for someone to run `allow`.
+type AutoAllower interface {
+	// Wants reports whether name should be forwarded instead of refused.
+	Wants(name string) bool
+	// Open is given the addresses in the upstream answer before the reply
+	// goes back, so the firewall is open by the time the client connects to
+	// them. An error, or an answer with nothing to open, is refused like any
+	// other name: the client never learns an address it cannot reach, and
+	// the name reaches the suggestion as it did before.
+	Open(name string, addrs []net.IP) error
 }
 
 // Start binds the listener and the upstream socket and begins serving.
@@ -196,6 +213,7 @@ func (s *Server) Start() error {
 	s.pending = map[uint16]chan []byte{}
 	s.refused = map[string]int{}
 	s.forwarded = map[string]int{}
+	s.auto = map[string]int{}
 
 	s.upstream4, _ = net.ListenUDP("udp4", &net.UDPAddr{Port: port})
 	s.upstream6, _ = net.ListenUDP("udp6", &net.UDPAddr{IP: net.IPv6unspecified, Port: port})
@@ -274,6 +292,9 @@ func (s *Server) Refused() []string { return s.names(s.refused) }
 
 // Forwarded returns the names that were forwarded, most asked first.
 func (s *Server) Forwarded() []string { return s.names(s.forwarded) }
+
+// AutoAllowed returns the names Auto opened, most asked first.
+func (s *Server) AutoAllowed() []string { return s.names(s.auto) }
 
 // Counts returns how many queries were refused and forwarded.
 func (s *Server) Counts() (refused, forwarded int) {
@@ -362,6 +383,11 @@ func (s *Server) handle(q []byte) []byte {
 		return nil
 	}
 	if !s.Policy.Allowed(name) {
+		if s.Auto != nil && s.Auto.Wants(name) {
+			if r := s.autoAllow(q, name); r != nil {
+				return r
+			}
+		}
 		s.mu.Lock()
 		first := s.refused[name] == 0
 		s.refused[name]++
@@ -378,6 +404,33 @@ func (s *Server) handle(q []byte) []byte {
 	if err != nil {
 		return servfail(q)
 	}
+	return r
+}
+
+// autoAllow forwards a query Auto wants, opens the addresses in the answer,
+// and returns the reply, or nil to have the query refused after all.
+//
+// A reply with no addresses in it (no such name, or the HTTPS record query
+// browsers send alongside A and AAAA) goes back as it is: it gives the client
+// nothing to connect to. A reply with any address goes back only once Open
+// has succeeded.
+func (s *Server) autoAllow(q []byte, name string) []byte {
+	r, err := s.forward(q)
+	if err != nil {
+		return servfail(q)
+	}
+	if addrs := answerAddrs(r); len(addrs) > 0 {
+		if err := s.Auto.Open(name, addrs); err != nil {
+			if s.Logf != nil {
+				s.Logf("dns filter: could not open %s automatically: %v", name, err)
+			}
+			return nil
+		}
+	}
+	s.mu.Lock()
+	s.auto[name]++
+	s.forwarded[name]++
+	s.mu.Unlock()
 	return r
 }
 
@@ -473,6 +526,63 @@ func questionName(q []byte) (string, bool) {
 		labels = append(labels, string(q[i:i+l]))
 		i += l
 	}
+}
+
+// answerAddrs returns the A and AAAA records in a successful reply's answer
+// section, whatever name they are for: a CNAME chain ends in addresses owned
+// by another name, and those are what the client will connect to.
+func answerAddrs(r []byte) []net.IP {
+	if len(r) < 12 || r[3]&0x0F != 0 {
+		return nil
+	}
+	qd := int(binary.BigEndian.Uint16(r[4:6]))
+	an := int(binary.BigEndian.Uint16(r[6:8]))
+	i := 12
+	for ; qd > 0; qd-- {
+		if i = skipName(r, i); i < 0 || i+4 > len(r) {
+			return nil
+		}
+		i += 4
+	}
+	var out []net.IP
+	for ; an > 0; an-- {
+		if i = skipName(r, i); i < 0 || i+10 > len(r) {
+			return out
+		}
+		typ := binary.BigEndian.Uint16(r[i : i+2])
+		n := int(binary.BigEndian.Uint16(r[i+8 : i+10]))
+		i += 10
+		if i+n > len(r) {
+			return out
+		}
+		switch {
+		case typ == 1 && n == 4, typ == 28 && n == 16:
+			out = append(out, net.IP(append([]byte(nil), r[i:i+n]...)))
+		}
+		i += n
+	}
+	return out
+}
+
+// skipName returns the offset just past a possibly compressed name at i, or
+// -1 if it runs off the end.
+func skipName(r []byte, i int) int {
+	for i < len(r) {
+		l := int(r[i])
+		switch {
+		case l == 0:
+			return i + 1
+		case l&0xC0 == 0xC0:
+			if i+2 > len(r) {
+				return -1
+			}
+			return i + 2
+		case l&0xC0 != 0:
+			return -1
+		}
+		i += l + 1
+	}
+	return -1
 }
 
 // questionEnd is the offset just past the question section.

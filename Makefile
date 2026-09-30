@@ -4,7 +4,7 @@ BIN_DIR  := bin
 VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS  := -X main.version=$(VERSION)
 
-.PHONY: all build install uninstall test vet fmt clean detect rescue e2e e2e-redact demo demo-allow testenv-up testenv-down testenv-logs hotspot-up hotspot-down hotspot-demo hotspot-known handoff-check dns-spike e2e-portal
+.PHONY: all build install uninstall test vet fmt clean detect rescue e2e e2e-redact demo demo-allow testenv-up testenv-down testenv-logs hotspot-up hotspot-down hotspot-demo hotspot-known hotspot-auto handoff-check dns-spike e2e-portal
 
 all: vet test build
 
@@ -133,6 +133,12 @@ hotspot-demo: build
 hotspot-known: build
 	@echo "this needs root, CUTS THE NETWORK, and points DNS at the hotspot while it runs."
 	sudo ./testenv/hotspot-demo.sh known
+
+# Auto-allow: the login page renders first time, with no allow and nothing
+# remembered. hotspot-demo is its control: the same portal with it off.
+hotspot-auto: build
+	@echo "this needs root, CUTS THE NETWORK, and points DNS at the hotspot while it runs."
+	sudo ./testenv/hotspot-demo.sh auto
 
 # --- The VPN handover ----------------------------------------------------------
 # Proves the handover hole on the wire, with no VPN: during a handover a UDP

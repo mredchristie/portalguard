@@ -221,7 +221,9 @@ func (p *portal) handleDNSMark(w http.ResponseWriter, r *http.Request) {
 // handleDNSLog returns every distinct name asked since the mark.
 func (p *portal) handleDNSLog(w http.ResponseWriter, r *http.Request) {
 	p.logMu.Lock()
-	names := append([]string(nil), p.dnsSeen...)
+	// Never nil: a gap in which nothing at all reached this resolver is the
+	// best result there is, and it must read as [] rather than null.
+	names := append([]string{}, p.dnsSeen...)
 	p.logMu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(names)

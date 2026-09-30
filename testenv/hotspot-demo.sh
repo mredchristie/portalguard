@@ -5,8 +5,12 @@
 # the "browser" takes is also a check, and the run ends with a verdict.
 #
 #   ./testenv/hotspot.sh up
-#   sudo ./testenv/hotspot-demo.sh          # first visit: blank page, allow, remember, login
+#   sudo ./testenv/hotspot-demo.sh auto     # auto-allow: the page renders first time, no allow
+#   sudo ./testenv/hotspot-demo.sh          # without it: blank page, allow, remember, login
 #   sudo ./testenv/hotspot-demo.sh known    # next visit: remembered hosts open themselves
+#
+# first and known run with -no-auto-allow: they prove the paths auto-allow
+# falls back to, which it would otherwise hide.
 #
 # Add "human" (first human, known human) to click Accept in the real browser
 # yourself instead of having curl log in, with time to reload and click. That
@@ -35,6 +39,7 @@ WAIT=60s
 # network during the gap.
 RUN_FLAGS=""
 [ "${DNS_FILTER:-on}" = off ] && RUN_FLAGS="-no-dns-filter"
+[ "$ACT" != auto ] && RUN_FLAGS="$RUN_FLAGS -no-auto-allow"
 [ "$MODE" = human ] && WAIT=180s
 BIN=${BIN:-./bin/portalguard}
 DOMAIN=${DOMAIN:-guestwifi.test}
@@ -50,6 +55,18 @@ curl -s -m 3 -o /dev/null "http://$WWW:8443/status" || { echo "hotspot not answe
 # /etc/pf.conf and take the hook with them, so this is worth checking first.
 /sbin/pfctl -s rules 2>/dev/null | grep -q 'anchor "portalguard"' \
     || { echo "pf has no portalguard anchor (a macOS update restores /etc/pf.conf). run: sudo $BIN install-anchor"; exit 64; }
+# `set skip on lo0` stops the DNS filter, and every filter check below would
+# fail for that reason alone. Internet Sharing sets it when the hotspot's
+# containers start (and NordVPN's kill switch leaves it behind), so clear it
+# here, after the hotspot is up, rather than grade a filterless run.
+skipping() {
+    /sbin/pfctl -s Interfaces -v 2>/dev/null | grep -Eq '^[[:space:]]*lo0[[:space:]].*[(]skip[)]'
+}
+if [ "${DNS_FILTER:-on}" != off ] && skipping; then
+    echo "pf is skipping loopback (Internet Sharing sets it for the hotspot); clearing it..."
+    "$BIN" install-anchor >/dev/null || exit 64
+    skipping && { echo "pf still skips loopback, so the DNS filter cannot run"; exit 64; }
+fi
 
 cleanup() {
     "$BIN" release >/dev/null 2>&1 || true
@@ -65,7 +82,7 @@ curl -s -m 3 -X POST -o /dev/null "http://$WWW:8443/reset"
 # A first visit means a network this Mac does not know yet, so forget the
 # hotspot's hosts from any earlier known-network run. Otherwise they open
 # themselves and the blank page never happens.
-if [ "$ACT" = first ] && [ -f /etc/portalguard/known-networks.json ]; then
+if [ "$ACT" != known ] && [ -f /etc/portalguard/known-networks.json ]; then
     python3 - "$DOMAIN" <<'PY'
 import json, sys
 path = "/etc/portalguard/known-networks.json"
@@ -188,10 +205,45 @@ known_visit() {
     banner "back to the first terminal"
 }
 
+# lookup prints the resolver's status for a name, as the system resolver
+# path sees it: dig asks the network's resolver, which pf sends to the filter.
+lookup() {
+    dig +time=3 +tries=1 +noall +comments "$1" 2>/dev/null |
+        sed -n 's/.*status: \([A-Z]*\).*/\1/p' | head -1
+}
+
+auto_visit() {
+    wait_for_gap || return 0
+    curl -s -m 2 -o /dev/null -X POST "http://$WWW:8443/dnsmark"
+    sleep 3
+    banner "browser: loading the login page"
+    page=$(fetch "http://www.$DOMAIN:8443/login")
+    echo "page:    $page"
+    js=$(fetch "http://cdn.$DOMAIN/site.js")
+    echo "site.js: $js  <- nobody ran allow"
+    check "login page reachable through the gap" "$page" loaded
+    check "cdn opened automatically on first sight" "$js" loaded
+    # The same lookup for a name on another site is still refused, and
+    # never reaches the network.
+    other=$(lookup "cdn.not$DOMAIN")
+    echo "cdn.not$DOMAIN: ${other:-no answer}  <- not the portal's site"
+    check "a lookalike domain is still refused" "$other" REFUSED
+    if [ "$MODE" = human ]; then
+        banner "the page renders first time: click Accept and connect"
+        return 0
+    fi
+    [ "$js" = loaded ] && echo "The page renders first time. Accept and connect..."
+    result=$(login)
+    echo "login:   $result"
+    check "login completes through reg, also opened automatically" "$result" "logged in"
+    banner "back to the first terminal"
+}
+
 case "$ACT" in
     first) first_visit & ;;
     known) known_visit & ;;
-    *) echo "usage: $0 [first|known] [auto|human]"; exit 64 ;;
+    auto) auto_visit & ;;
+    *) echo "usage: $0 [first|known|auto] [auto|human]"; exit 64 ;;
 esac
 BROWSER=$!
 
@@ -207,11 +259,18 @@ check "run noticed the login and sealed" "$status" 0
 # network, so a name it never heard never left this machine. Released first:
 # the sealed lockdown would drop the request for the log itself.
 "$BIN" release >/dev/null 2>&1
-leaked=$(curl -s -m 3 "http://$WWW:8443/dnslog" | python3 -c '
+# Retried: straight after the release, the first request can still meet the
+# sealed ruleset's dropped state and time out.
+dnslog=""
+for _ in 1 2 3 4 5; do
+    dnslog=$(curl -s -f -m 3 "http://$WWW:8443/dnslog") && break
+    sleep 1
+done
+leaked=$(printf '%s' "$dnslog" | python3 -c '
 import json, sys
 login = {"www.guestwifi.test", "cdn.guestwifi.test", "reg.guestwifi.test",
          "captive.apple.com", "connectivitycheck.gstatic.com"}
-names = json.load(sys.stdin)
+names = json.load(sys.stdin) or []  # an older hotspot says null for none
 print(" ".join(sorted(n for n in names if n not in login)) or "none")
 ' 2>/dev/null || echo "unreadable")
 echo "DNS that reached the network during the gap, beyond the login's own names: $leaked"

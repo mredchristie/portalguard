@@ -30,18 +30,16 @@ sudo ./bin/portalguard install-anchor    # once per machine; adds two lines to /
 sudo ./bin/portalguard run              # the whole flow
 ```
 
-`run` opens the login page in your browser and waits. If the page comes up
-blank, it names the hosts that are missing and the command to open them:
+`run` opens the login page in your browser and waits. Hosts on the portal's
+own site (`cdn.btwifi.com` for `www.btwifi.com`) open as the page asks for
+them, so it renders first time.
 
-```
-  Looked up but not open: cdn.btwifi.com, reg.btwifi.com
-  If the login page is blank or broken, these are what to open:
-    sudo portalguard allow cdn.btwifi.com reg.btwifi.com
-```
-
-Run that in a second terminal. `sudo portalguard remember` then saves those
-hosts, and next time they open by themselves, but only after each passes a
-fresh TLS certificate check.
+Anything else stays shut, including a payment page on another domain. If the
+page stalls, run with `-verbose`: every refused name is listed as it happens,
+and typing one into the same terminal opens it. `sudo portalguard allow
+<host>` from a second terminal does the same. `sudo portalguard remember` then
+saves what you opened, and next time it opens by itself, but only after each
+host passes a fresh TLS certificate check.
 
 `sudo make install` puts the binary on your PATH as `portalguard`.
 
@@ -63,6 +61,7 @@ fresh TLS certificate check.
 | `uninstall-anchor` | yes | Undo that. |
 
 Useful `run` flags: `-vpn host:port/proto` (a VPN on unusual ports),
+`-verbose` (every name refused, as it happens), `-no-auto-allow`,
 `-no-handoff`, `-no-dns-filter`, `-redact` (share a report without naming
 your services).
 

@@ -56,6 +56,20 @@ type Session struct {
 	// dns is the filtering resolver, while this session is running one. See
 	// dnsfilter.go.
 	dns *dnsfilter.Server
+
+	// autoOn asks StartDNSFilter to open the portal's own site as the page
+	// asks for it; auto is what does so. See autoallow.go.
+	autoOn bool
+	auto   *autoAllow
+	// dnsVerbose has the filter log each name the first time it refuses it,
+	// so a login stuck on another domain (a payment page) can be spotted
+	// while it is happening. See UseVerboseDNS.
+	dnsVerbose bool
+
+	// gapMu is held across AllowExtra's check-and-open and across Seal and
+	// Release, so a host added from inside this process (the prompt) can
+	// never land after the seal and open a new gap on a sealed machine.
+	gapMu sync.Mutex
 }
 
 // NewSession wires a session. A nil prober gets the default probe list.
@@ -390,6 +404,7 @@ func (s *Session) OpenGap(ctx context.Context) error {
 		s.logf("gap opened for %s", h)
 	}
 
+	s.startAutoFromLog(res.PortalHost)
 	_, err = s.machine.Apply(EventOpenGap, res.PortalHost)
 	return err
 }
@@ -398,6 +413,8 @@ func (s *Session) OpenGap(ctx context.Context) error {
 // through a second hostname (a payment provider, a CDN for their CSS), and the
 // user has to be able to add it without dropping the lockdown.
 func (s *Session) AllowExtra(ctx context.Context, host string, ports ...int) error {
+	s.gapMu.Lock()
+	defer s.gapMu.Unlock()
 	if !s.machine.Can(EventExtendGap) {
 		return &InvalidTransitionError{From: s.machine.State(), Event: EventExtendGap}
 	}
@@ -646,6 +663,7 @@ func (s *Session) WaitForAuth(ctx context.Context, every time.Duration) error {
 			return &NotEnforcedError{Why: why}
 		}
 		s.openProbeChecks(ctx)
+		s.autoFromLog(ctx)
 		ok, err := s.CheckAuth(ctx)
 		if err != nil {
 			return err
@@ -718,9 +736,14 @@ func (s *Session) suggest() {
 // Seal closes the gap again, leaving a bare lockdown. Traffic is still
 // blocked; this is the state we hand to the VPN from.
 func (s *Session) Seal(ctx context.Context) error {
+	s.gapMu.Lock()
+	defer s.gapMu.Unlock()
 	if !s.machine.Can(EventSeal) {
 		return &InvalidTransitionError{From: s.machine.State(), Event: EventSeal}
 	}
+	// Before the seal, not after: an automatic open that landed between the
+	// two would open a new gap on a sealed machine.
+	s.stopAutoAllow()
 	if err := s.fw.Seal(ctx); err != nil {
 		return fmt.Errorf("seal: %w", err)
 	}
@@ -753,6 +776,9 @@ func (s *Session) Report() (firewall.Report, bool) {
 // Release tears everything down and returns to Idle. It is legal from any
 // state and is what the crash handler and `portalguard release` call.
 func (s *Session) Release(ctx context.Context) error {
+	s.gapMu.Lock()
+	defer s.gapMu.Unlock()
+	s.stopAutoAllow()
 	err := s.fw.Release(ctx)
 	s.stopDNSFilter()
 	s.mu.Lock()

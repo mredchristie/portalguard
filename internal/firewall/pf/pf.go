@@ -248,7 +248,7 @@ func (b *Backend) Status(ctx context.Context) (firewall.Status, error) {
 		}
 		return st, fmt.Errorf("read anchor rules: %w", err)
 	}
-	rules := strings.TrimSpace(out)
+	rules := strings.TrimSpace(stripPfctlNoise(out))
 	st.Managed = rules != ""
 	st.Detail = rules
 	if !st.Managed {
@@ -319,6 +319,21 @@ func (b *Backend) pfctlStdin(ctx context.Context, stdin []byte, args ...string) 
 		return text, fmt.Errorf("pfctl %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(text))
 	}
 	return text, nil
+}
+
+// stripPfctlNoise drops the lines pfctl prints on stderr whatever it is asked,
+// which the combined output would otherwise pass off as rules. On a Mac
+// without ALTQ, every call can open with two of them.
+func stripPfctlNoise(out string) string {
+	var keep []string
+	for _, line := range strings.Split(out, "\n") {
+		t := strings.TrimSpace(line)
+		if strings.HasPrefix(t, "No ALTQ support in kernel") || strings.HasPrefix(t, "ALTQ related functions disabled") {
+			continue
+		}
+		keep = append(keep, line)
+	}
+	return strings.Join(keep, "\n")
 }
 
 // appendNote adds a non-fatal problem to logNote, keeping any earlier one

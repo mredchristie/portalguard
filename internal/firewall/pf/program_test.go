@@ -314,3 +314,39 @@ func TestSealEmptiesTheTables(t *testing.T) {
 		t.Errorf("seal must flush the gap tables; calls were:\n  %s", strings.Join(f.calls, "\n  "))
 	}
 }
+
+// TestRelockKeepsTheAccount: armed detection opens a detection gap and then
+// locks down again. That second lockdown is not a fresh engagement, and what
+// was blocked before it (the join burst) must still be in the report.
+func TestRelockKeepsTheAccount(t *testing.T) {
+	f := newFakePfctl(t)
+	b := newTestBackend(t, f)
+	ctx := context.Background()
+	if err := b.Lockdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+	f.traffic(250, 0) // the join burst, held back while armed
+	dnsHost := firewall.Host{Name: "resolvers", Addrs: []net.IP{net.ParseIP("192.168.0.1")}, AllowDNSTo: true, Ports: []int{53}}
+	if err := b.AllowHost(ctx, dnsHost); err != nil {
+		t.Fatal(err)
+	}
+	f.traffic(10, 4)
+	if err := b.Lockdown(ctx); err != nil { // back to a bare lockdown after detection
+		t.Fatal(err)
+	}
+	if got := b.LeakReport().BlockedOutPackets; got != 260 {
+		t.Errorf("BlockedOutPackets after the re-lock = %d, want 260: the join burst was wiped", got)
+	}
+
+	// A new engagement, in a new process, still starts from nothing.
+	if err := b.Release(ctx); err != nil {
+		t.Fatal(err)
+	}
+	b2 := newTestBackend(t, f)
+	if err := b2.Lockdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := b2.LeakReport(); !got.Empty() {
+		t.Errorf("a fresh lockdown inherited an old account: %+v", got)
+	}
+}

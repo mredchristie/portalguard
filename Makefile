@@ -4,7 +4,7 @@ BIN_DIR  := bin
 VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS  := -X main.version=$(VERSION)
 
-.PHONY: fuzz all build install uninstall test vet fmt clean detect rescue e2e e2e-redact demo demo-allow testenv-up testenv-down testenv-logs hotspot-up hotspot-down hotspot-demo hotspot-known hotspot-auto hotspot-hostile preflight handoff-check dns-spike e2e-portal
+.PHONY: fuzz all build install uninstall test vet fmt clean detect rescue e2e e2e-redact demo demo-allow testenv-up testenv-down testenv-logs hotspot-up hotspot-down hotspot-demo hotspot-known hotspot-auto hotspot-hostile hotspot-armed preflight handoff-check dns-spike e2e-portal
 
 all: vet test build
 
@@ -158,6 +158,12 @@ hotspot-hostile: build
 	@echo "this needs root, CUTS THE NETWORK, and points DNS at the hotspot while it runs."
 	sudo ./testenv/hotspot-demo.sh hostile-known
 	sudo ./testenv/hotspot-demo.sh hostile
+
+# Armed: lock down first, then join the hotspot. Nothing but detection and the
+# login may reach its DNS during the join.
+hotspot-armed: build
+	@echo "this needs root, CUTS THE NETWORK, and points DNS at the hotspot while it runs."
+	sudo ./testenv/hotspot-demo.sh armed
 
 # Before a field test: unit tests, then every hotspot run back to back, with a
 # verdict per suite. Brings the hotspot up and takes it down again.

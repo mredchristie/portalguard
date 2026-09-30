@@ -50,7 +50,14 @@ func (g *guide) transition(t state.Transition) {
 		g.stepf("Checking this network")
 	case state.EventPortalFound:
 		g.sayf("Found a login page: %s", t.Note)
+	case state.EventArm:
+		g.stepf("Armed")
+		g.sayf("Everything on this Mac is blocked before it joins a network, so nothing leaks when it does.")
 	case state.EventNoPortal:
+		if t.From == state.Armed {
+			g.sayf("No login page here (%s).", strings.ToLower(strings.ReplaceAll(t.Note, "_", " ")))
+			return
+		}
 		switch t.Note {
 		case "OPEN_INTERNET":
 			g.sayf("There is no login page here: you are already online. Nothing to do.")

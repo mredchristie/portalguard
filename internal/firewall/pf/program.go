@@ -32,6 +32,14 @@ func (b *Backend) Lockdown(ctx context.Context) error {
 		return err
 	}
 
+	// Locking down from nothing is a fresh engagement. Locking down again
+	// while engaged (armed detection going back to a bare lockdown) is not,
+	// and its account carries on: what the join burst tried to send is the
+	// number armed mode exists for.
+	// This process's own view, not the kernel's: a run starting over a
+	// crashed run's leftover rules is still a fresh account.
+	fresh := b.phase != firewall.PhaseLocked && b.phase != firewall.PhaseGap
+
 	if err := b.loadLocked(ctx, gap{}); err != nil {
 		return err
 	}
@@ -39,14 +47,22 @@ func (b *Backend) Lockdown(ctx context.Context) error {
 	b.phase = firewall.PhaseLocked
 	b.allowed = nil
 	b.dnsFilter = false
-	b.since = time.Now()
-	// A fresh engagement gets a fresh account, on disk as well as in memory.
-	b.counters = tally{}
-	b.counterNoteMade = false
-	clearTally()
+	if fresh {
+		b.since = time.Now()
+		// A fresh engagement gets a fresh account, on disk as well as in memory.
+		b.counters = tally{}
+		b.counterNoteMade = false
+		clearTally()
+	}
 	b.gapOpened = time.Time{}
 	b.gapClosed = time.Time{}
 	b.resolvers = nil
+	// A lockdown can follow an open gap (armed detection re-locks before the
+	// login), so a running log reader is stopped, not just forgotten: an
+	// orphaned tcpdump keeps pflog1 open and outlives the process.
+	if b.reader != nil {
+		b.reader.Stop()
+	}
 	b.reader = nil
 	b.leakNames = nil
 	b.leakProcesses = nil

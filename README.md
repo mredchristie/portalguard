@@ -44,6 +44,13 @@ host passes a fresh TLS certificate check.
 
 `sudo make install` puts the binary on your PATH as `portalguard`.
 
+**Better still: arm before you join.** Everything leaks in the first seconds
+after a Mac joins a network, before you could type anything. `sudo
+portalguard arm`, then join the Wi-Fi: the lockdown is already there, it
+detects the portal through it, and carries on as `run` does. On an open
+network it goes straight to VPN-only, and on one you have marked with
+`portalguard trust` it stands down.
+
 ## Commands
 
 | Command | Root | What it does |
@@ -53,6 +60,9 @@ host passes a fresh TLS certificate check.
 | `doctor` | | Is this Mac ready to run? Read-only; checks the firewall too with sudo. |
 | `status` | yes | What pf is actually enforcing, and whether it is still in force. |
 | `run` | yes | The whole flow, from detection to handover. |
+| `arm` | yes | Like `run`, but locks down first: arm, then join the Wi-Fi, and nothing leaks while it connects. |
+| `trust [label]` | yes | Mark the network you are on as yours: `arm` stands down there. `-list` to see them. |
+| `untrust` | yes | Stop trusting it. |
 | `lockdown` | yes | Block everything. |
 | `allow [host[:port]...]` | yes | Open the gap, or widen it for named hosts. |
 | `remember` | yes | Save the hosts you allowed, for next time. |

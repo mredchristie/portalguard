@@ -74,3 +74,16 @@ func ActiveTunnel(ctx context.Context) (*Tunnel, error) {
 	}
 	return &Tunnel{Interface: dr.Interface, Addr: addr, Gateway: dr.Gateway}, nil
 }
+
+// GatewayMAC returns the hardware address of the default gateway, which is how
+// a trusted network is recognised: it needs no location permission, unlike
+// the Wi-Fi name, which recent macOS hides from command-line tools.
+func GatewayMAC(ctx context.Context, gw net.IP) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "/usr/sbin/arp", "-n", gw.String()).Output()
+	if err != nil {
+		return "", fmt.Errorf("arp %s: %w", gw, err)
+	}
+	return parseARP(string(out))
+}

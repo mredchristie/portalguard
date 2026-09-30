@@ -79,3 +79,34 @@ func interfaceAddr(name string) net.IP {
 	}
 	return nil
 }
+
+// parseARP reads the hardware address out of `arp -n <ip>`:
+//
+//	? (192.168.0.1) at b4:ba:9d:d6:59:e9 on en0 ifscope [ethernet]
+//
+// macOS drops leading zeros (0:1a:...), so it is normalised to two digits a
+// byte, which is what makes two readings of the same router compare equal.
+func parseARP(out string) (string, error) {
+	_, rest, ok := strings.Cut(out, " at ")
+	if !ok {
+		return "", fmt.Errorf("no hardware address in %q", strings.TrimSpace(out))
+	}
+	field := strings.Fields(rest)
+	if len(field) == 0 {
+		return "", fmt.Errorf("no hardware address in %q", strings.TrimSpace(out))
+	}
+	parts := strings.Split(field[0], ":")
+	if len(parts) != 6 {
+		return "", fmt.Errorf("not a hardware address: %q", field[0])
+	}
+	for i, p := range parts {
+		if len(p) == 0 || len(p) > 2 {
+			return "", fmt.Errorf("not a hardware address: %q", field[0])
+		}
+		if len(p) == 1 {
+			p = "0" + p
+		}
+		parts[i] = strings.ToLower(p)
+	}
+	return strings.Join(parts, ":"), nil
+}

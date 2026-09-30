@@ -109,33 +109,40 @@ func rememberable(name string) bool {
 // earlier one. Atomic for the same reason SaveSnapshot is: a temporary file
 // in the same directory, then a rename.
 func SaveKnownNetworks(path string, networks map[string]KnownNetwork) error {
-	data, err := json.MarshalIndent(knownNetworksFile{Version: knownNetworksVersion, Networks: networks}, "", "  ")
+	return writeJSONAtomic(path, knownNetworksFile{Version: knownNetworksVersion, Networks: networks}, "known networks")
+}
+
+// writeJSONAtomic writes v to path as indented JSON, readable by all: a
+// temporary file in the same directory, then a rename, so a reader never
+// sees half a file.
+func writeJSONAtomic(path string, v any, what string) error {
+	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
-		return fmt.Errorf("encode known networks: %w", err)
+		return fmt.Errorf("encode %s: %w", what, err)
 	}
 	data = append(data, '\n')
 
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create known networks directory: %w", err)
+		return fmt.Errorf("create %s directory: %w", what, err)
 	}
 	f, err := os.CreateTemp(dir, filepath.Base(path)+".*")
 	if err != nil {
-		return fmt.Errorf("create known networks file: %w", err)
+		return fmt.Errorf("create %s file: %w", what, err)
 	}
 	tmp := f.Name()
 	defer os.Remove(tmp) // no-op once the rename below succeeds
 
 	if err := f.Chmod(0o644); err != nil {
 		f.Close()
-		return fmt.Errorf("chmod known networks file: %w", err)
+		return fmt.Errorf("chmod %s file: %w", what, err)
 	}
 	if _, err := f.Write(data); err != nil {
 		f.Close()
-		return fmt.Errorf("write known networks file: %w", err)
+		return fmt.Errorf("write %s file: %w", what, err)
 	}
 	if err := f.Close(); err != nil {
-		return fmt.Errorf("close known networks file: %w", err)
+		return fmt.Errorf("close %s file: %w", what, err)
 	}
 	return os.Rename(tmp, path)
 }

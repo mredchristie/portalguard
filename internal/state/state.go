@@ -38,6 +38,9 @@ const (
 	// HandedOff means the user's VPN is up and owns the connection. Our rules
 	// have been released.
 	HandedOff State = "HANDED_OFF"
+	// Armed means everything is blocked before any network is known: the
+	// lockdown came first, and detection happens through it. See armed.go.
+	Armed State = "ARMED"
 )
 
 // Event is something that happened, which may move the machine.
@@ -63,6 +66,8 @@ const (
 	EventSeal Event = "SEAL"
 	// EventHandOff reports that the VPN is up and our rules are released.
 	EventHandOff Event = "HAND_OFF"
+	// EventArm locks everything down before detection, rather than after.
+	EventArm Event = "ARM"
 	// EventRelease aborts from anywhere: rules torn down, back to Idle. This
 	// is the escape hatch, and it is legal in every state.
 	EventRelease Event = "RELEASE"
@@ -85,7 +90,16 @@ const (
 var transitions = map[State]map[Event]State{
 	Idle: {
 		EventDetect:  Detecting,
+		EventArm:     Armed,
 		EventRelease: Idle,
+	},
+	// Armed detection ends locked down either way. A portal goes on to the
+	// gap; no portal goes on to the VPN handover, which a lockdown supports.
+	// A trusted network is released.
+	Armed: {
+		EventPortalFound: LockedDown,
+		EventNoPortal:    LockedDown,
+		EventRelease:     Idle,
 	},
 	Detecting: {
 		EventPortalFound: PortalFound,
@@ -130,7 +144,7 @@ var transitions = map[State]map[Event]State{
 // It is what the exit handler consults to decide whether a release is needed.
 func (s State) Engaged() bool {
 	switch s {
-	case LockedDown, GapOpen, Authenticated, Sealed:
+	case Armed, LockedDown, GapOpen, Authenticated, Sealed:
 		return true
 	default:
 		return false

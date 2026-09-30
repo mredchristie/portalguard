@@ -42,6 +42,7 @@ func runDoctor(ctx context.Context, args []string) int {
 	fs2 = append(fs2, pfFindings(ctx, root)...)
 	fs2 = append(fs2, neighbourFindings()...)
 	fs2 = append(fs2, knownFinding(len(state.LoadKnownNetworks(state.KnownNetworksPath))))
+	fs2 = append(fs2, trustFinding(ctx))
 	if !root {
 		fs2 = append(fs2, finding{"info", "the firewall was not checked",
 			fmt.Sprintf("that needs root: sudo %s doctor", invokedAs())})
@@ -185,4 +186,28 @@ func knownFinding(n int) finding {
 		return finding{"info", "no remembered networks yet", "after a login, `sudo portalguard remember` saves what you opened"}
 	}
 	return finding{"ok", fmt.Sprintf("%d remembered network(s) in %s", n, state.KnownNetworksPath), ""}
+}
+
+// trustFinding says whether an armed Mac would stand down on this network.
+func trustFinding(ctx context.Context) finding {
+	n := len(state.LoadTrusted(state.TrustedPath))
+	mac, err := currentGatewayMAC(ctx)
+	if err == nil {
+		if tn, ok := state.IsTrusted(state.TrustedPath, mac); ok {
+			return finding{"ok", fmt.Sprintf("this network is trusted (%s): arm stands down here", firstNonEmpty(tn.Label, mac)), ""}
+		}
+	}
+	if n == 0 {
+		return finding{"info", "no trusted networks", fmt.Sprintf("at home: sudo %s trust home, so arm stands down there", invokedAs())}
+	}
+	return finding{"ok", fmt.Sprintf("%d trusted network(s); this one is not among them", n), ""}
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }

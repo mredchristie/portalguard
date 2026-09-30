@@ -224,8 +224,30 @@ Verified on real hardware, and re-verified by `testenv/e2e.sh`:
 | A DNS name disguised as an allowed one is refused | `hotspot-demo.sh hostile`: one label spelling `cdn.guestwifi.test` got REFUSED |
 | The parsers of untrusted input do not crash | `make fuzz`: six fuzz targets over DNS queries and replies, portal pages, redirect URLs and the site matcher; the four bugs they found are saved as regression inputs |
 | pf redirects IPv6 DNS as well as IPv4 | `make dns-spike` on a network listing an IPv6 resolver: direct lookups to it over UDP and TCP both diverted |
+| Armed: nothing leaks while a network is joined | `hotspot-demo.sh armed`: locked down on the home network, then joined the hotspot; detection went through the lockdown, 524 packets of join burst were held back, and the hotspot's resolver heard only detection and the login |
 | A stale session file cannot claim a gap the ruleset denies | Unit tests over every phase/snapshot pairing |
 | Detection survives a real portal | BT Wi-Fi, live: portal found, host pinned, non-standard port carried through, clean release |
+
+## Armed mode
+
+`arm` reverses `run`'s order: lock down, then detect. Detection through the
+lockdown runs the DNS filter in probe mode (the probe names, the hijack
+check's made-up `.invalid` name, and the login host once the probes name it;
+nothing else), opens each probe answer as a check hole on 80 and 443 so the
+probe can connect, and pins the login host without opening it. The ruleset
+then goes back to a bare lockdown before the login's own gap, so no
+detection hole carries over. The state machine has one new state, `ARMED`,
+engaged like a lockdown: from it, detection leads only to `LOCKED_DOWN`.
+
+A lockdown while already engaged keeps the running account, so the report
+counts what the join burst tried to send. What armed detection does not do
+is follow the portal's redirect chain: that needs connections to the portal,
+which the lockdown refuses until the gap. A chain on the portal's own site is
+caught by auto-allow; one elsewhere falls back to the suggestion.
+
+Trusted networks are recognised by the gateway's hardware address, and trust
+is acted on only when detection also finds open internet: a trusted router
+with a login page in front of it is treated as a stranger.
 
 ## What is not proven
 

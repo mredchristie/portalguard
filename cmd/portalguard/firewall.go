@@ -626,8 +626,17 @@ func printSuggestion(names []string) {
 // ==== the whole flow ======================================================
 // detect, lock down, open the gap, wait for you to log in, seal.
 
-func runFlow(ctx context.Context, args []string) int {
-	fs := flag.NewFlagSet("run", flag.ContinueOnError)
+func runFlow(ctx context.Context, args []string) int { return runFlowMode(ctx, args, false) }
+
+// runArm is run with the lockdown first: see internal/state/armed.go.
+func runArm(ctx context.Context, args []string) int { return runFlowMode(ctx, args, true) }
+
+func runFlowMode(ctx context.Context, args []string, armed bool) int {
+	name := "run"
+	if armed {
+		name = "arm"
+	}
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.Usage = func() {
 		fmt.Fprint(os.Stderr, `usage: portalguard run [flags]
 
@@ -654,6 +663,12 @@ flags:
 	noDNSFilter := fs.Bool("no-dns-filter", false, "let the gap's DNS go straight to the network's resolver, for every app, as v0.2 did")
 	noAutoAllow := fs.Bool("no-auto-allow", false, "never open the portal's own hosts automatically; suggest them for allow instead, as v0.3 did")
 	handoffWait := fs.Duration("handoff-wait", 3*time.Minute, "how long to wait for the VPN tunnel after sealing")
+	var next *bool
+	var joinWait *time.Duration
+	if armed {
+		next = fs.Bool("next", false, "wait for the next network rather than checking the one this Mac is on now")
+		joinWait = fs.Duration("join-wait", 30*time.Minute, "how long to wait, armed, for a network to join")
+	}
 	tracePath := fs.String("trace", "", "record everything this run prints, and every DNS query with what the filter did, timestamped, to this file (holds real hostnames)")
 	auditLog := fs.String("audit-log", "", "write the full, unredacted report to this file (never to stdout) - for verifying a -redact run against ground truth without displaying it")
 	if err := fs.Parse(args); err != nil {
@@ -678,7 +693,7 @@ flags:
 	var tr *tracer
 	if *tracePath != "" {
 		var err error
-		if tr, err = startTrace(*tracePath, append([]string{"run"}, args...)); err != nil {
+		if tr, err = startTrace(*tracePath, append([]string{name}, args...)); err != nil {
 			return fail(err)
 		}
 		defer tr.close()
@@ -693,7 +708,7 @@ flags:
 	if err := checkNoActiveVPN(ctx, *allowVPN); err != nil {
 		return fail(err)
 	}
-	if err := requireRoot("run"); err != nil {
+	if err := requireRoot(name); err != nil {
 		return fail(err)
 	}
 
@@ -732,17 +747,43 @@ flags:
 	sess.UseKnownNetworks(state.KnownNetworksPath)
 
 	err = firewall.Guard(fw, logf, func() error {
-		res, err := sess.Detect(ctx)
-		if err != nil {
-			return err
-		}
-		if res.Class != portal.Portal {
-			logf("nothing to do (%s)", res.Class)
-			return nil
-		}
-
-		if err := sess.Lockdown(ctx); err != nil {
-			return err
+		var res portal.Result
+		if armed {
+			var released bool
+			res, released, err = armedDetect(ctx, sess, g, note, *next, *joinWait)
+			if err != nil || released {
+				return err
+			}
+			if res.Class != portal.Portal {
+				// An open network, not trusted: the lockdown stands, and
+				// only the VPN may leave until its tunnel is up.
+				if *noHandoff {
+					g.stepf("Connect your VPN when you are ready")
+					g.sayf("Traffic stays blocked until then: sudo %s handoff, then connect it.", invokedAs())
+					if g == nil {
+						fmt.Printf("No portal. When you are ready: sudo %s handoff, then connect your VPN.\n", invokedAs())
+					}
+					return nil
+				}
+				endpoints, err := vpns.endpoints(state.SystemResolve(ctx))
+				if err != nil {
+					note("%v; handing over on the default VPN ports instead", err)
+					endpoints = state.DefaultVPNEndpoints()
+				}
+				return handOff(ctx, sess, endpoints, *handoffWait, g)
+			}
+		} else {
+			res, err = sess.Detect(ctx)
+			if err != nil {
+				return err
+			}
+			if res.Class != portal.Portal {
+				logf("nothing to do (%s)", res.Class)
+				return nil
+			}
+			if err := sess.Lockdown(ctx); err != nil {
+				return err
+			}
 		}
 		// Before the gap, so its rules carry the filter from the first load.
 		// Without it the gap still works, with the machine-wide DNS hole.

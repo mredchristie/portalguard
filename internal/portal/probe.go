@@ -84,6 +84,10 @@ type Prober struct {
 	// SkipDNSCheck disables the resolver-integrity checks, which cost one
 	// extra lookup.
 	SkipDNSCheck bool
+	// OnPortal, if set, is told the login host as soon as the probes name
+	// it, before it is resolved and pinned. Detection through a lockdown
+	// uses it to let exactly that lookup through its filter.
+	OnPortal func(host string)
 }
 
 // NewProber returns a Prober with sensible defaults.
@@ -143,6 +147,11 @@ func (p *Prober) Detect(ctx context.Context) Result {
 	p.classify(&res)
 
 	if res.Class == Portal && res.PortalURL != "" {
+		if p.OnPortal != nil {
+			if host, _, ok := splitURL(res.PortalURL); ok {
+				p.OnPortal(host)
+			}
+		}
 		p.pinPortal(ctx, &res)
 	}
 	res.Took = time.Since(start)

@@ -65,8 +65,20 @@ func vpnFlag(fs *flag.FlagSet) *bool {
 
 // logf is the CLI's logger: plain lines on stderr so stdout stays parseable.
 func logf(format string, args ...any) {
+	if quietLog {
+		// Guided run: the technical line is for the record, not the screen.
+		activeTrace.line("log", fmt.Sprintf("portalguard: "+format, args...))
+		return
+	}
 	fmt.Fprintf(os.Stderr, "portalguard: "+format+"\n", args...)
 }
+
+// quietLog sends logf to the -trace file only, while a guided run tells the
+// screen what is happening in plain words. activeTrace is that file, if any.
+var (
+	quietLog    bool
+	activeTrace *tracer
+)
 
 // ==== read-only commands ==================================================
 // Status just reports. It changes nothing.
@@ -524,6 +536,19 @@ func sessionLine(st firewall.Status) string {
 // verified against real ground truth (e.g. by the e2e suite, checking that
 // nothing raw reached what got displayed or recorded) without the real
 // hostnames ever appearing on screen. Most callers leave it empty.
+// writeAuditLog writes the full report to path, for a guided run, which
+// prints only a summary. See printReport's auditLog.
+func writeAuditLog(sess *state.Session, path string) {
+	if path == "" {
+		return
+	}
+	if rep, ok := sess.Report(); ok && !rep.Empty() {
+		if err := os.WriteFile(path, []byte(rep.String()), 0o600); err != nil {
+			logf("could not write -audit-log %s: %v", path, err)
+		}
+	}
+}
+
 func printReport(sess *state.Session, redact, verbose bool, auditLog string) {
 	rep, ok := sess.Report()
 	if !ok {
@@ -622,7 +647,7 @@ flags:
 	poll := fs.Duration("poll", 3*time.Second, "how often to re-probe while waiting")
 	allowVPN := vpnFlag(fs)
 	redact := fs.Bool("redact", false, "generalise hostnames in the leak report to categories, for output you plan to share")
-	verbose := fs.Bool("verbose", false, "list every name refused during the gap, not only the portal's own, and why process attribution backed off if it did")
+	verbose := fs.Bool("verbose", false, "show the technical log and the full report instead of plain steps, and list every name refused as it happens")
 	var vpns endpointFlags
 	fs.Var(&vpns, "vpn", vpnFlagHelp)
 	noHandoff := fs.Bool("no-handoff", false, "stop at SEALED instead of handing over to your VPN")
@@ -634,6 +659,21 @@ flags:
 	if err := fs.Parse(args); err != nil {
 		return exitUsageError
 	}
+	// Plain steps when a person is watching, the technical log when a script
+	// is: e2e and anything else that captures run's output reads the log.
+	// Decided before -trace swaps stdout for a pipe.
+	var g *guide
+	if !*verbose && isTerminal(os.Stdout) {
+		g = &guide{out: os.Stdout}
+		quietLog = true
+		defer func() { quietLog = false }()
+	}
+	// note tells the user something that matters in either mode.
+	note := func(format string, args ...any) {
+		logf(format, args...)
+		g.sayf("note: "+format, args...)
+	}
+
 	// First, so a run that fails its preflight is on record too.
 	var tr *tracer
 	if *tracePath != "" {
@@ -642,6 +682,11 @@ flags:
 			return fail(err)
 		}
 		defer tr.close()
+		activeTrace = tr
+		defer func() { activeTrace = nil }()
+	}
+	if g != nil {
+		fmt.Println("PortalGuard")
 	}
 	// The VPN check comes before the root check on purpose: it is the more
 	// informative failure, and it is actionable without sudo.
@@ -666,7 +711,7 @@ flags:
 	// while nothing of ours is loaded.
 	if !*noDNSFilter {
 		if cleared, err := clearLoopbackSkipForRun(ctx); err != nil {
-			logf("pf skips loopback and it could not be cleared, so the DNS filter will be off: %v", err)
+			note("pf skips loopback and it could not be cleared, so the DNS filter will be off: %v", err)
 		} else if cleared {
 			logf("pf was skipping loopback (a VPN kill switch or Internet Sharing leaves that behind); reset it so the DNS filter can run")
 		}
@@ -677,7 +722,10 @@ flags:
 	defer safety.Stop()
 
 	sess := state.NewSession(fw, prober, logf)
-	sess.Machine().Observe(func(t state.Transition) { logf("%s", t) })
+	sess.Machine().Observe(func(t state.Transition) {
+		logf("%s", t)
+		g.transition(t)
+	})
 	// Record every move, so `allow` from a second terminal can widen the gap
 	// this run is about to open while this one sits waiting for the login.
 	sess.PersistTo(state.SessionPath)
@@ -707,7 +755,7 @@ flags:
 		}
 		if !*noDNSFilter {
 			if err := sess.StartDNSFilter(ctx); err != nil {
-				logf("dns filter off, so every app's lookups can reach the network during the gap: %v", err)
+				note("dns filter off, so every app's lookups can reach the network during the gap: %v", err)
 			}
 		}
 		if err := sess.OpenGap(ctx); err != nil {
@@ -719,16 +767,25 @@ flags:
 		// Only for hosts this site has been seen and verified on before -
 		// each one still has to complete a fresh TLS handshake before it is
 		// opened. See docs/gap-scope.md, option E.
-		if opened := sess.OpenKnown(ctx); len(opened) > 0 {
+		// (A guided run has already said so, as each one opened.)
+		if opened := sess.OpenKnown(ctx); len(opened) > 0 && g == nil {
 			fmt.Printf("Opened automatically (known network, TLS verified): %s\n", strings.Join(opened, ", "))
 		}
 
-		fmt.Printf("\nOpen this page and log in yourself:\n  %s\n\n", res.PortalURL)
-		fmt.Println("Everything else on this machine is blocked while you do.")
-		if err := openBrowser(res.PortalURL); err != nil {
-			logf("could not open a browser automatically: %v", err)
+		if g != nil {
+			g.sayf("If it does not open by itself: %s", res.PortalURL)
+		} else {
+			fmt.Printf("\nOpen this page and log in yourself:\n  %s\n\n", res.PortalURL)
+			fmt.Println("Everything else on this machine is blocked while you do.")
 		}
-		fmt.Printf("Waiting up to %s for the login to go through...\n", *wait)
+		if err := openBrowser(res.PortalURL); err != nil {
+			note("could not open a browser automatically: %v", err)
+		}
+		if g != nil {
+			g.sayf("Waiting for you to finish (up to %s)...", *wait)
+		} else {
+			fmt.Printf("Waiting up to %s for the login to go through...\n", *wait)
+		}
 
 		// A portal host that is missing from the gap usually shows up as a
 		// blank page rather than as an error, so say what is being looked
@@ -763,7 +820,7 @@ flags:
 		if !*noHandoff {
 			endpoints, err = vpns.endpoints(state.SystemResolve(ctx))
 			if err != nil {
-				logf("%v; handing over on the default VPN ports instead", err)
+				note("%v; handing over on the default VPN ports instead", err)
 				endpoints = state.DefaultVPNEndpoints()
 			}
 		}
@@ -771,15 +828,24 @@ flags:
 		if err := sess.Seal(ctx); err != nil {
 			return err
 		}
-		fmt.Println("\nAuthenticated and sealed. Traffic is still blocked.")
-
-		printReport(sess, *redact, *verbose, *auditLog)
+		if g != nil {
+			g.summary(sess)
+			writeAuditLog(sess, *auditLog)
+		} else {
+			fmt.Println("\nAuthenticated and sealed. Traffic is still blocked.")
+			printReport(sess, *redact, *verbose, *auditLog)
+		}
 
 		if *noHandoff {
+			if g != nil {
+				g.stepf("Connect your VPN when you are ready")
+				g.sayf("Traffic stays blocked until then: sudo %s handoff, then connect it.", invokedAs())
+				return nil
+			}
 			fmt.Printf("When you are ready: sudo %s handoff, then connect your VPN.\n", invokedAs())
 			return nil
 		}
-		return handOff(ctx, sess, endpoints, *handoffWait)
+		return handOff(ctx, sess, endpoints, *handoffWait, g)
 	})
 	if err != nil {
 		return fail(hint(err))

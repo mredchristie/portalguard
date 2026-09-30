@@ -384,9 +384,18 @@ login = {"www.guestwifi.test", "cdn.guestwifi.test", "reg.guestwifi.test",
          "captive.apple.com", "connectivitycheck.gstatic.com"}
 # Hosts auto-allow opened are the login too, and only those: the trace says
 # which. A host it refused must not appear under any record type.
+import re
 opened = set(sys.argv[1].split())
+own = login | opened
+# A browser asks for the HTTPS record of a site on a non-default port as
+# _8443._https.<host>. For the login page, or a host auto-allow opened, that
+# is the page itself being loaded, not another app.
+port_prefixed = re.compile(r"^_[0-9]+\._https\.(.+)$")
+def ours(n):
+    m = port_prefixed.match(n)
+    return n in own or (m is not None and m.group(1) in own)
 names = json.load(sys.stdin) or []  # an older hotspot says null for none
-print(" ".join(sorted(n for n in names if n not in login and n not in opened)) or "none")
+print(" ".join(sorted(n for n in names if not ours(n))) or "none")
 ' "$opened" 2>/dev/null || echo "unreadable")
 echo "DNS that reached the network during the gap, beyond the login's own names: $leaked"
 check "no other app's DNS left the machine during the gap" "$leaked" none

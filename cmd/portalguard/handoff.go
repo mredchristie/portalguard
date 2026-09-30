@@ -86,7 +86,7 @@ flags:
 	if err != nil {
 		return fail(err)
 	}
-	if err := handOff(ctx, sess, endpoints, *wait); err != nil {
+	if err := handOff(ctx, sess, endpoints, *wait, nil); err != nil {
 		return fail(err)
 	}
 	return exitOK
@@ -94,9 +94,14 @@ flags:
 
 // handOff runs the handover and says what happened. Shared by `handoff` and
 // by `run`, which hands over by itself once it has sealed.
-func handOff(ctx context.Context, sess *state.Session, endpoints []firewall.Endpoint, wait time.Duration) error {
-	fmt.Printf("\nConnect your VPN now. Until its tunnel is up, only VPN traffic can leave.\n")
-	fmt.Printf("Waiting up to %s for the tunnel...\n", wait)
+func handOff(ctx context.Context, sess *state.Session, endpoints []firewall.Endpoint, wait time.Duration, g *guide) error {
+	if g != nil {
+		g.stepf("Connect your VPN now")
+		g.sayf("Until its tunnel is up, only VPN traffic can leave. Waiting up to %s...", wait)
+	} else {
+		fmt.Printf("\nConnect your VPN now. Until its tunnel is up, only VPN traffic can leave.\n")
+		fmt.Printf("Waiting up to %s for the tunnel...\n", wait)
+	}
 
 	res, err := sess.HandOff(ctx, endpoints, wait)
 	var ne *state.NotEnforcedError
@@ -114,6 +119,14 @@ func handOff(ctx context.Context, sess *state.Session, endpoints []firewall.Endp
 	}
 	// The rules are gone, so the session file describes nothing any more.
 	state.ClearSnapshot(state.SessionPath)
+	if g != nil {
+		g.sayf("Your VPN is up on %s.", res.Interface)
+		if res.TakenOver {
+			g.sayf("Its own firewall took over while it connected, and PortalGuard cleared its rules.")
+		}
+		fmt.Fprintln(g.out, "\nAll done. PortalGuard has stepped aside; your VPN has the connection.")
+		return nil
+	}
 	if res.TakenOver {
 		fmt.Printf("\nYour VPN is up on %s.\n", res.Interface)
 		fmt.Println("While it connected, its own firewall replaced portalguard's, so its kill switch,")

@@ -30,7 +30,8 @@ sudo ./bin/portalguard install-anchor    # once per machine; adds two lines to /
 sudo ./bin/portalguard run              # the whole flow
 ```
 
-`run` opens the login page in your browser and waits. Hosts on the portal's
+`run` talks you through it in plain numbered steps (`-verbose` shows the
+technical log instead), opens the login page in your browser, and waits. Hosts on the portal's
 own site (`cdn.btwifi.com` for `www.btwifi.com`) open as the page asks for
 them, so it renders first time.
 

@@ -13,6 +13,7 @@ import (
 	"portalguard/internal/firewall"
 	"portalguard/internal/firewall/backend"
 	"portalguard/internal/state"
+	"portalguard/internal/vpn"
 )
 
 // ==== handing over to the VPN =============================================
@@ -31,6 +32,11 @@ const vpnFlagHelp = "a VPN server to let through during the handover, as host:po
 // an error that says to use an address instead.
 func (e endpointFlags) endpoints(resolve func(string) ([]net.IP, error)) ([]firewall.Endpoint, error) {
 	if len(e) == 0 {
+		// The chosen VPN's own server, when it can be known: tighter than
+		// the usual ports to anywhere.
+		if es, ok := chosenEndpoints(); ok {
+			return es, nil
+		}
 		return state.DefaultVPNEndpoints(), nil
 	}
 	var out []firewall.Endpoint
@@ -95,10 +101,22 @@ flags:
 // handOff runs the handover and says what happened. Shared by `handoff` and
 // by `run`, which hands over by itself once it has sealed.
 func handOff(ctx context.Context, sess *state.Session, endpoints []firewall.Endpoint, wait time.Duration, g *guide) error {
-	if g != nil {
+	chosen, starting := chosenVPN(ctx)
+	if starting {
+		id := chosen.ID
+		sess.UseVPNConnect(func(ctx context.Context) error { return vpn.Start(ctx, id) })
+	}
+	switch {
+	case g != nil && starting:
+		g.stepf("Starting your VPN (%s)", chosen.Name)
+		g.sayf("Until its tunnel is up, only VPN traffic can leave. Waiting up to %s...", wait)
+	case g != nil:
 		g.stepf("Connect your VPN now")
 		g.sayf("Until its tunnel is up, only VPN traffic can leave. Waiting up to %s...", wait)
-	} else {
+	case starting:
+		fmt.Printf("\nStarting %q. Until its tunnel is up, only VPN traffic can leave.\n", chosen.Name)
+		fmt.Printf("Waiting up to %s for the tunnel...\n", wait)
+	default:
 		fmt.Printf("\nConnect your VPN now. Until its tunnel is up, only VPN traffic can leave.\n")
 		fmt.Printf("Waiting up to %s for the tunnel...\n", wait)
 	}

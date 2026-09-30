@@ -68,6 +68,10 @@ type Session struct {
 	// dnsTrace is told about every query the filter answers. See UseDNSTrace.
 	dnsTrace func(name, qtype, verdict string)
 
+	// vpnConnect, if set, starts the user's VPN once the handover's hole is
+	// open. See UseVPNConnect.
+	vpnConnect func(context.Context) error
+
 	// gapMu is held across AllowExtra's check-and-open and across Seal and
 	// Release, so a host added from inside this process (the prompt) can
 	// never land after the seal and open a new gap on a sealed machine.

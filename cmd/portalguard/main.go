@@ -53,6 +53,7 @@ func commands() []command {
 		{"arm", "like run, but lock down first and then join the network (root)", runArm},
 		{"trust", "mark the network you are on as yours: arm stands down there (root)", runTrust},
 		{"untrust", "stop trusting it (root)", runUntrust},
+		{"vpn", "list VPNs, or choose one for the handover to start by itself", runVPN},
 		{"print-rules", "print the pf ruleset without loading it", runPrintRules},
 		{"install-anchor", "add the portalguard anchor point to /etc/pf.conf (root, once)", runInstallAnchor},
 		{"uninstall-anchor", "remove it again (root)", runUninstallAnchor},

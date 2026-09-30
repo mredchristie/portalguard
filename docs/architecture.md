@@ -225,6 +225,7 @@ Verified on real hardware, and re-verified by `testenv/e2e.sh`:
 | The parsers of untrusted input do not crash | `make fuzz`: six fuzz targets over DNS queries and replies, portal pages, redirect URLs and the site matcher; the four bugs they found are saved as regression inputs |
 | pf redirects IPv6 DNS as well as IPv4 | `make dns-spike` on a network listing an IPv6 resolver: direct lookups to it over UDP and TCP both diverted |
 | Armed: nothing leaks while a network is joined | `hotspot-demo.sh armed`: locked down on the home network, then joined the hotspot; detection went through the lockdown, 524 packets of join burst were held back, and the hotspot's resolver heard only detection and the login |
+| The handover can start the VPN itself, through a hole one server wide | Live: `vpn use` a WireGuard tunnel, then `lockdown` and `handoff`: the hole was pinned to its server (`203.0.113.10:51820/udp`, read from macOS's own VPN settings), the tunnel was started by portalguard, came up on utun4, and the rules were released |
 | A stale session file cannot claim a gap the ruleset denies | Unit tests over every phase/snapshot pairing |
 | Detection survives a real portal | BT Wi-Fi, live: portal found, host pinned, non-standard port carried through, clean release |
 

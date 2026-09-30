@@ -14,6 +14,7 @@ import (
 	"portalguard/internal/dnsfilter"
 	"portalguard/internal/netinfo"
 	"portalguard/internal/state"
+	"portalguard/internal/vpn"
 )
 
 // ==== is this Mac ready to run? ============================================
@@ -43,6 +44,7 @@ func runDoctor(ctx context.Context, args []string) int {
 	fs2 = append(fs2, neighbourFindings()...)
 	fs2 = append(fs2, knownFinding(len(state.LoadKnownNetworks(state.KnownNetworksPath))))
 	fs2 = append(fs2, trustFinding(ctx))
+	fs2 = append(fs2, vpnFinding(ctx))
 	if !root {
 		fs2 = append(fs2, finding{"info", "the firewall was not checked",
 			fmt.Sprintf("that needs root: sudo %s doctor", invokedAs())})
@@ -210,4 +212,20 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// vpnFinding says whether the handover will start a VPN by itself.
+func vpnFinding(ctx context.Context) finding {
+	if s, ok := chosenVPN(ctx); ok {
+		detail := "the default VPN ports stay open to any address until its tunnel is up"
+		if es, ok := chosenEndpoints(); ok {
+			detail = "only its server, " + describe(es) + ", may be reached until its tunnel is up"
+		}
+		return finding{"ok", fmt.Sprintf("the handover starts your VPN: %q", s.Name), detail}
+	}
+	if ss, err := vpn.List(ctx); err == nil && len(ss) > 0 {
+		return finding{"info", fmt.Sprintf("the handover asks you to connect your VPN; it could start %q itself", ss[0].Name),
+			fmt.Sprintf("sudo %s vpn use %q", invokedAs(), ss[0].Name)}
+	}
+	return finding{"info", "the handover asks you to connect your VPN", ""}
 }

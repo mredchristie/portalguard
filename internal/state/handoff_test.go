@@ -258,3 +258,28 @@ func TestWaitForAuthStopsWhenTheLockdownStopsApplying(t *testing.T) {
 		t.Fatalf("err = %v, want a NotEnforcedError", err)
 	}
 }
+
+// TestHandOffStartsTheVPNAfterItsHole: the VPN is started only once its hole
+// is open, and a failure to start it leaves the wait (and a hand-connected
+// VPN) to carry on.
+func TestHandOffStartsTheVPNAfterItsHole(t *testing.T) {
+	fw := &fakeBackend{}
+	s := sealedSession(t, fw)
+	stubTunnel(t, &netinfo.Tunnel{Interface: "utun6"})
+
+	var holeOpenWhenStarted bool
+	s.UseVPNConnect(func(context.Context) error {
+		holeOpenWhenStarted = strings.Contains(strings.Join(fw.callsMade(), " "), "vpn:")
+		return errors.New("no such service")
+	})
+	res, err := s.HandOff(context.Background(), DefaultVPNEndpoints(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !holeOpenWhenStarted {
+		t.Error("the VPN was started before its hole was open; its handshake would have been dropped")
+	}
+	if res.Interface != "utun6" {
+		t.Errorf("a failed start stopped the handover: %+v", res)
+	}
+}

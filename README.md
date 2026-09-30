@@ -63,6 +63,7 @@ network it goes straight to VPN-only, and on one you have marked with
 | `arm` | yes | Like `run`, but locks down first: arm, then join the Wi-Fi, and nothing leaks while it connects. |
 | `trust [label]` | yes | Mark the network you are on as yours: `arm` stands down there. `-list` to see them. |
 | `untrust` | yes | Stop trusting it. |
+| `vpn list` / `vpn use <name>` | `use`: yes | Choose a VPN for the handover to start by itself (any in macOS's own VPN settings, WireGuard's included). |
 | `lockdown` | yes | Block everything. |
 | `allow [host[:port]...]` | yes | Open the gap, or widen it for named hosts. |
 | `remember` | yes | Save the hosts you allowed, for next time. |

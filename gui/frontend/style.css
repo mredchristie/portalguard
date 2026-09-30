@@ -65,6 +65,19 @@ body {
   opacity: 0.08;
 }
 
+/* ==== the title bar ====================================================== */
+
+/* The native title bar is hidden so the window is one dark surface, which
+   leaves the page to provide one: a strip across the top that moves the
+   window when dragged, under the close and minimise buttons. */
+.titlebar {
+  position: fixed;
+  inset: 0 0 auto 0;
+  height: 30px;
+  z-index: 10;
+  --wails-draggable: drag;
+}
+
 /* ==== layout ============================================================= */
 
 .app {
@@ -72,7 +85,8 @@ body {
   height: 100%;
   display: grid;
   grid-template-rows: auto auto 1fr auto auto;
-  padding: 18px 24px 22px;
+  /* clear of the title bar and its buttons */
+  padding: 38px 24px 22px;
   gap: 14px;
 }
 
@@ -80,9 +94,8 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  /* the window's title bar area: draggable in the app */
+  /* the header can move the window too */
   --wails-draggable: drag;
-  padding-top: 6px;
 }
 
 .brand {
@@ -400,6 +413,47 @@ body {
   color: var(--red);
 }
 
+.checks {
+  list-style: none;
+  display: grid;
+  gap: 7px;
+}
+.checks li {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.35;
+  animation: rise 0.45s var(--ease) both;
+}
+.checks li:nth-child(2) { animation-delay: 0.05s; }
+.checks li:nth-child(3) { animation-delay: 0.1s; }
+.checks li:nth-child(4) { animation-delay: 0.15s; }
+.checks li:nth-child(5) { animation-delay: 0.2s; }
+.checks li:nth-child(6) { animation-delay: 0.25s; }
+.checks i {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  transform: translateY(-1px);
+  background: var(--muted);
+}
+.checks .lvl-ok i {
+  background: var(--green);
+  box-shadow: 0 0 6px rgba(0, 255, 136, 0.6);
+}
+.checks .lvl-warn i {
+  background: var(--amber);
+}
+.checks .lvl-fail i {
+  background: var(--red);
+}
+.checks .lvl-fail span {
+  color: var(--text);
+}
+
 /* ==== steps ============================================================== */
 
 .steps {
@@ -491,6 +545,11 @@ body {
 }
 .btn--primary:hover {
   transform: translateY(-1px);
+}
+.btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+  transform: none;
 }
 .btn--quiet {
   color: var(--text);

@@ -51,6 +51,7 @@
       error: '',
       trusted: '',
       wait: '',
+      doctor: st ? st.doctor : null,
     };
   }
   reset();
@@ -95,6 +96,13 @@
         st.vpnIface = ev.interface;
         break;
       case 'done':
+        if (ev.cancelled) {
+          const doctor = st.doctor;
+          reset();
+          st.doctor = doctor;
+          st.note = 'Cancelled. Your network is back.';
+          break;
+        }
         if (st.phase !== 'trusted') {
           st.phase = ev.state === 'HANDED_OFF' ? 'done' : 'sealedwait';
           st.step = ev.state === 'HANDED_OFF' ? 5 : 4;
@@ -153,6 +161,7 @@
   // ==== drawing ===========================================================
 
   const COPY = {
+    starting: ['Starting', 'lock', 'Starting', 'Enter your Mac password to let PortalGuard control the firewall.'],
     idle: ['Ready', 'shield', 'Ready when you are', 'Arm before you join public Wi-Fi. Nothing on this Mac can reach the network until you have signed in and your VPN is up.'],
     armed: ['Armed', 'wifi', 'Join the Wi-Fi now', 'Everything on this Mac is blocked, so nothing leaks while it connects.'],
     locked: ['Locked', 'lock', 'Checking this network', 'Only PortalGuard’s own checks can get out.'],
@@ -238,6 +247,13 @@
         <div class="stat"><b data-count="${Math.round(s.gap_seconds || 0)}" data-suffix="s">0s</b><span>the gap was open</span></div>
       </div>`);
     }
+    if (st.phase === 'idle' && st.doctor) {
+      // doctor, as this user: what would stop a run, before one starts.
+      const rows = st.doctor.filter((f) => f.title !== 'the firewall was not checked').slice(0, 6);
+      parts.push(`<div class="label">This Mac</div><ul class="checks">${rows
+        .map((f) => `<li class="lvl-${esc(f.level)}"><i></i><span>${esc(cap(f.title))}</span></li>`)
+        .join('')}</ul>`);
+    }
     if (st.note && st.phase !== 'done') parts.push(`<p class="note">${esc(st.note)}</p>`);
     const html = parts.join('');
     if (html !== el.context.dataset.html) {
@@ -249,6 +265,7 @@
 
   function drawActions() {
     const running = !['idle', 'done', 'trusted', 'error'].includes(st.phase);
+    el.primary.disabled = st.phase === 'starting';
     el.primary.textContent = running ? 'Cancel' : st.phase === 'idle' ? 'Arm' : 'Arm again';
     el.primary.className = running ? 'btn btn--quiet' : 'btn btn--primary';
     el.hint.textContent = running
@@ -270,6 +287,10 @@
     });
   }
 
+  function cap(s) {
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  }
+
   function esc(s) {
     return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
   }
@@ -285,12 +306,25 @@
 
   el.primary.addEventListener('click', () => {
     const running = !['idle', 'done', 'trusted', 'error'].includes(st.phase);
+    if (st.phase === 'starting') return;
     if (engine) {
       if (running) engine.Cancel();
       else {
+        const doctor = st.doctor;
         reset();
+        st.doctor = doctor;
+        st.phase = 'starting';
         draw();
-        engine.Arm().catch((e) => onEvent({ type: 'error', text: String(e) }));
+        engine.Arm().catch((e) => {
+          const text = String(e);
+          if (text.includes('password prompt')) {
+            st.phase = 'idle';
+            st.note = 'Not armed: the password prompt was closed.';
+            draw();
+          } else {
+            onEvent({ type: 'error', text });
+          }
+        });
       }
     } else if (!running) {
       demo();
@@ -304,6 +338,16 @@
 
   if (engine) {
     window.runtime.EventsOn('feed', onEvent);
+    const refresh = () =>
+      engine
+        .Doctor()
+        .then((fs) => {
+          st.doctor = fs;
+          if (st.phase === 'idle') draw();
+        })
+        .catch(() => {});
+    refresh();
+    window.addEventListener('focus', refresh);
   }
 
   // A real armed login, from the feed of a hotspot run, with a payment host
@@ -345,7 +389,17 @@
     }
   }
 
+  const DEMO_DOCTOR = [
+    { level: 'ok', title: 'network: default route on en0 via 192.168.0.1' },
+    { level: 'ok', title: 'the portalguard anchor is in /etc/pf.conf' },
+    { level: 'ok', title: "the DNS filter's ports are free (53530, 41053)" },
+    { level: 'ok', title: 'this network is trusted (home): arm stands down here' },
+    { level: 'ok', title: 'the handover starts your VPN: "My VPN"' },
+    { level: 'info', title: 'NordVPN is installed' },
+  ];
+
   const q = new URLSearchParams(location.search);
+  if (!engine) st.doctor = DEMO_DOCTOR;
   if (!engine && q.has('demo')) {
     demo(q.has('at') ? Number(q.get('at')) : undefined);
   } else {

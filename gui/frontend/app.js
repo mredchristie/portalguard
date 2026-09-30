@@ -370,7 +370,10 @@
       const suffix = b.dataset.suffix || '';
       const t0 = performance.now();
       const tick = (t) => {
-        const k = Math.min(1, (t - t0) / 900);
+        // A frame's timestamp can come before t0 (it is when the frame began,
+        // and a background frame's can be long before), which made the count
+        // start in the negative hundreds. Never before zero.
+        const k = Math.max(0, Math.min(1, (t - t0) / 900));
         b.textContent = Math.round(to * (1 - Math.pow(1 - k, 3))) + suffix;
         if (k < 1) requestAnimationFrame(tick);
       };

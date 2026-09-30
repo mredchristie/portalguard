@@ -565,11 +565,14 @@
       draw();
       return;
     }
-    let t = 0;
+    // ?pick: start on the list with that network chosen, as a person would.
+    let t = q.has('pick') ? 2600 : 0;
     for (const [dt, ev] of REPLAY) {
       t += dt;
       timers.push(setTimeout(() => onEvent(ev), t));
     }
+    // ?loop: play it again, for a page that shows the app running.
+    if (q.has('loop')) timers.push(setTimeout(() => demo(), t + 5000));
   }
 
   const DEMO_DOCTOR = [

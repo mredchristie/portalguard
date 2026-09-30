@@ -15,3 +15,5 @@ export function Networks():Promise<main.Scan>;
 export function Open(arg1:string):Promise<void>;
 
 export function OpenURL(arg1:string):Promise<void>;
+
+export function Release():Promise<void>;

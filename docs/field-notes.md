@@ -162,20 +162,39 @@ That report also asserted a cause it had never checked - it said the counters
 tracks how many samples were attempted and how many failed, and only blames
 the measurement when the measurement actually failed.
 
-### Next: EE WiFi (paid, by the hour)
+### EE WiFi (paid, £5.99 an hour), 30 September 2026
 
-The first real test of auto-allow, and of a portal that takes payment. Before
-leaving: `make preflight` should end "ready for the field". On site:
+The first real network for armed mode, auto-allow, and the app. Stopped at
+the price page each time: the payment step is still to be met.
 
-0. At home: `sudo portalguard doctor` should say Ready.
-1. Disconnect the VPN, and quit its app.
-2. Join the network. Do not click anything in the popup macOS shows.
-3. `sudo portalguard run -verbose -trace ~/ee-trace.log`
-4. EE's own hosts should open by themselves. If the page stalls on a payment
-   step, the refused names are listed as they happen: type the payment host's
-   name into the same terminal and press Enter.
-5. Pay, log in, wait for SEALED, then connect the VPN when it says so.
+| | |
+| --- | --- |
+| Armed, then joined | **worked**: `arm -join "EE WiFi"` locked first, macOS joined in about 5 seconds |
+| Detection through the lockdown | **worked**: found `ee-wifi.ee.co.uk`, only the probes' lookups got out |
+| Auto-allow | **worked**: `cdn-wifi.ee.co.uk` opened by itself, the page rendered first time |
+| DNS filter | **worked**: about 55 names refused on the Mac (Spotify, WhatsApp, iCloud push, Gmail, Netflix, Google, GitHub), none reached EE |
+| The app | **worked**: Arm and join, browser on the login page 4 to 5 seconds after pressing Arm; Cancel gave the network back |
 
-The trace keeps every line and every DNS verdict, timestamped, for writing
-up here afterwards.
+**macOS holds a joined network back for about 40 seconds.** After joining,
+macOS gives the Wi-Fi an address and knows its DNS server, but does not make
+it the primary network (no default route, `/etc/resolv.conf` still empty)
+until its own login-page check finishes. Under the lockdown that check cannot
+get out, so it times out: 41 seconds on the first run, which looked like a
+hang and was stopped just before it would have carried on. Fixed by reading
+the DNS server from macOS's live settings (`scutil --dns`), binding
+detection's connections to the Wi-Fi interface so they need no default
+route, and letting macOS's own check (`captive.apple.com`, and
+`captive.g.aaplimg.com` behind it) through the detection hole. Join to open
+gap went from 42 seconds to under 1.
 
+**Internet Sharing re-applies `set skip on lo0` whenever the network
+changes.** Apple's container service had been left running by the hotspot
+tests, and joining EE put the skip back mid-run, after `run` had cleared it.
+Detection now carries on with PortalGuard's own lookups when that happens
+(other apps' lookups still go nowhere), and `hotspot-down` stops the service.
+
+**EE runs on BT's infrastructure**: macOS also asked for `*.btwifi.com`
+service names on it. Refused, correctly: not EE's site.
+
+Still to see: the payment step, whether it needs a host on another site, and
+whether it all holds on a second visit.

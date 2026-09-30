@@ -29,3 +29,7 @@ export function Open(arg1) {
 export function OpenURL(arg1) {
   return window['go']['main']['App']['OpenURL'](arg1);
 }
+
+export function Release() {
+  return window['go']['main']['App']['Release']();
+}

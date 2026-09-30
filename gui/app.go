@@ -133,6 +133,25 @@ func (a *App) Arm(ssid, password string) error {
 	return nil
 }
 
+// Release gives the network back after a run that stopped with the lockdown
+// still in place: the engine fails closed, and has exited, so this is a new
+// `portalguard release` through the password prompt.
+func (a *App) Release() error {
+	bin, err := engineBinary()
+	if err != nil {
+		return err
+	}
+	script := "do shell script " + appleString(shq(bin)+" release") +
+		" with administrator privileges with prompt \"PortalGuard needs your password to give the network back.\""
+	if out, err := exec.Command("/usr/bin/osascript", "-e", script).CombinedOutput(); err != nil {
+		if strings.Contains(string(out), "-128") {
+			return errors.New("cancelled at the password prompt")
+		}
+		return fmt.Errorf("release: %s", strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 // Cancel asks the engine to stop and give the network back.
 func (a *App) Cancel() { a.send("cancel") }
 

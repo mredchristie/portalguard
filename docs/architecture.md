@@ -226,6 +226,7 @@ Verified on real hardware, and re-verified by `testenv/e2e.sh`:
 | pf redirects IPv6 DNS as well as IPv4 | `make dns-spike` on a network listing an IPv6 resolver: direct lookups to it over UDP and TCP both diverted |
 | Armed: nothing leaks while a network is joined | `hotspot-demo.sh armed`: locked down on the home network, then joined the hotspot; detection went through the lockdown, 524 packets of join burst were held back, and the hotspot's resolver heard only detection and the login |
 | The handover can start the VPN itself, through a hole one server wide | Live: `vpn use` a WireGuard tunnel, then `lockdown` and `handoff`: the hole was pinned to its server (`203.0.113.10:51820/udp`, read from macOS's own VPN settings), the tunnel was started by portalguard, came up on utun4, and the rules were released |
+| Armed mode, joining, detection through the lockdown and auto-allow hold on a real paid network | EE WiFi, from the terminal and from the app: portal found under 1 second after the join, CDN opened by itself, about 55 background names refused; the browser on the login page 4 to 5 seconds after pressing Arm |
 | A stale session file cannot claim a gap the ruleset denies | Unit tests over every phase/snapshot pairing |
 | Detection survives a real portal | BT Wi-Fi, live: portal found, host pinned, non-standard port carried through, clean release |
 
@@ -254,12 +255,11 @@ with a login page in front of it is treated as a stranger.
 
 This section is the reason the document exists.
 
-**Auto-allow has not met a real portal.** Every run so far is the hotspot,
-whose login hosts sit neatly under one domain. A real portal may send its
-login through a CDN on another domain, a payment provider, or a host whose
-site `siteOf` gets wrong. Each of those falls back to the suggestion rather
-than failing open, which is proven by unit tests; how often it happens on
-real networks is not known yet.
+**Auto-allow has met one real portal, not its payment step.** At EE WiFi
+it opened the portal's CDN by itself and the page rendered first time; the
+payment step, which may need a host on another site, is not yet seen. A host
+on another site falls back to the suggestion rather than failing open,
+which is proven by unit tests; how often real portals need one is not known.
 
 **The end-to-end test uses a gateway split.** A container runtime on macOS
 cannot give a portal that is off-box from the Mac: published ports are bound by

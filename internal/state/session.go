@@ -648,6 +648,17 @@ func (s *Session) CheckAuth(ctx context.Context) (bool, error) {
 	// every re-check it only adds a made-up name for the filter to refuse.
 	p := *s.prober
 	p.SkipDNSCheck = true
+	// Before macOS makes the network primary, the re-probe too has to leave
+	// by the Wi-Fi interface, and ask the filter (if there is one) directly.
+	if iface := s.boundInterface(); iface != "" {
+		p.Control = netinfo.BindTo(iface)
+		s.mu.Lock()
+		filtering := s.dns != nil
+		s.mu.Unlock()
+		if filtering {
+			p.Resolver = filterResolver()
+		}
+	}
 	res := p.Detect(ctx)
 	s.mu.Lock()
 	s.last = res

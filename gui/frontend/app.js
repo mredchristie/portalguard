@@ -337,7 +337,7 @@
       el.hint.innerHTML = '<button class="textlink" data-arm-any>Arm without choosing</button> · you will be asked for your Mac password';
       return;
     }
-    el.primary.textContent = running ? 'Cancel' : 'Back to networks';
+    el.primary.textContent = running ? 'Cancel' : st.phase === 'error' ? 'Give the network back' : 'Back to networks';
     el.primary.className = running ? 'btn btn--quiet' : 'btn btn--primary';
     el.hint.textContent = running
       ? 'Cancel releases everything and gives the network back.'
@@ -409,6 +409,24 @@
     if (st.phase === 'starting') return;
     if (engine && st.phase === 'idle') {
       if (st.selected) arm(st.selected);
+      return;
+    }
+    if (engine && st.phase === 'error') {
+      // The engine stops with the lockdown in place (it fails closed), and
+      // has exited: releasing takes a fresh password prompt.
+      el.primary.disabled = true;
+      engine
+        .Release()
+        .then(() => {
+          backToNetworks();
+          st.note = 'The network is back. If this Mac stayed on that Wi-Fi, choose your usual one.';
+          draw();
+        })
+        .catch((e) => {
+          el.primary.disabled = false;
+          st.error = `${st.error}\n\nReleasing failed: ${e}`;
+          draw();
+        });
       return;
     }
     if (engine && !running) {

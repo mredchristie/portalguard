@@ -85,7 +85,11 @@ down() {
     for n in pg-www pg-cdn pg-reg pg-net; do
         container rm -f "$n" >/dev/null 2>&1 || true
     done
-    echo "hotspot down"
+    # The container service runs Internet Sharing, which puts `set skip on
+    # lo0` back every time the network changes: left running, it breaks the
+    # DNS filter on the next real network. Found at EE WiFi.
+    container system stop >/dev/null 2>&1 || true
+    echo "hotspot down (container service stopped)"
 }
 
 status() {

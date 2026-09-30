@@ -121,9 +121,23 @@ func (s *Session) DetectArmed(ctx context.Context) (portal.Result, error) {
 		srv.Stop()
 		return s.fw.Lockdown(ctx)
 	}
+	selfOnly := false
 	if err := filterer.UseDNSFilter(ctx); err != nil {
-		_ = relock()
-		return portal.Result{}, fmt.Errorf("detect armed: %w", err)
+		// pf skipping loopback (Internet Sharing re-applies it whenever the
+		// network changes, so it can arrive mid-run, after the start of run
+		// cleared it) stops the filter catching other apps' lookups. Detection
+		// does not need theirs, only its own, which do not rely on loopback.
+		sf, ok := s.fw.(firewall.SelfDNSFilterer)
+		if !ok {
+			_ = relock()
+			return portal.Result{}, fmt.Errorf("detect armed: %w", err)
+		}
+		if serr := sf.UseDNSFilterForSelf(ctx); serr != nil {
+			_ = relock()
+			return portal.Result{}, fmt.Errorf("detect armed: %w", serr)
+		}
+		selfOnly = true
+		s.logf("%v; detecting with PortalGuard's own lookups only", err)
 	}
 	resolvers := firewall.Host{
 		Name:       "network resolvers",
@@ -138,16 +152,19 @@ func (s *Session) DetectArmed(ctx context.Context) (portal.Result, error) {
 	}
 	s.logf("detecting through the lockdown: only the probes' own lookups may leave")
 
-	prev := s.prober.OnPortal
+	prev, prevControl, prevResolver := s.prober.OnPortal, s.prober.Control, s.prober.Resolver
 	s.prober.OnPortal = opener.resolveOnly
 	if iface != "" {
-		// Kept for the rest of the session: the re-probe while the user
-		// logs in may still be before macOS makes the network primary.
 		s.prober.Control = netinfo.BindTo(iface)
+	}
+	if iface != "" || selfOnly {
+		// Straight to the filter: without a default route there is no
+		// system DNS yet, and with loopback skipped the system's lookups are
+		// not redirected to the filter.
 		s.prober.Resolver = filterResolver()
 	}
 	res := s.prober.Detect(ctx)
-	s.prober.OnPortal = prev
+	s.prober.OnPortal, s.prober.Control, s.prober.Resolver = prev, prevControl, prevResolver
 
 	if err := relock(); err != nil {
 		return res, fmt.Errorf("detect armed: back to a bare lockdown: %w", err)

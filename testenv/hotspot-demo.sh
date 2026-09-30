@@ -51,6 +51,8 @@ esac
 # from lockdown to SEALED. TRACE=file keeps it somewhere of your choosing.
 RUNTRACE=${TRACE:-$(mktemp -t portalguard-demo-trace)}
 RUN_FLAGS="$RUN_FLAGS -trace $RUNTRACE"
+# JSON=1 runs with -json: the progress feed a GUI reads, instead of text.
+[ -n "${JSON:-}" ] && RUN_FLAGS="$RUN_FLAGS -json"
 # armed locks down first, on the home network, and waits for the next one.
 RUNCMD=run
 [ "$ACT" = armed ] && RUNCMD="arm -next -join-wait 60s"

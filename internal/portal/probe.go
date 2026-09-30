@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // ==== what a clean response looks like ====================================
@@ -385,6 +386,9 @@ func isAppleSuccess(body []byte) bool {
 // which is how many portals bounce a client without sending a 302.
 var metaRefreshRe = regexp.MustCompile(`(?is)<meta[^>]+http-equiv\s*=\s*["']?refresh["']?[^>]*content\s*=\s*["']([^"']*)["']`)
 
+// refreshURLRe finds the url= part of a refresh's content attribute.
+var refreshURLRe = regexp.MustCompile(`(?i)url\s*=`)
+
 // jsRedirectRe finds the other common bounce: window.location = "...".
 var jsRedirectRe = regexp.MustCompile(`(?is)(?:window\.)?location(?:\.href)?\s*=\s*["']([^"']+)["']`)
 
@@ -392,8 +396,13 @@ var jsRedirectRe = regexp.MustCompile(`(?is)(?:window\.)?location(?:\.href)?\s*=
 func metaRefreshURL(body []byte, base string) string {
 	if m := metaRefreshRe.FindSubmatch(body); m != nil {
 		content := string(m[1])
-		if i := strings.Index(strings.ToLower(content), "url="); i >= 0 {
-			return resolveRef(base, strings.Trim(strings.TrimSpace(content[i+4:]), `"'`))
+		// Matched on the original bytes. Lowercasing a copy to search it
+		// shifts every offset after an invalid byte (it becomes a 3-byte
+		// replacement character), and slicing the original with that offset
+		// panicked: a portal page could crash detection. Found by
+		// FuzzMetaRefresh.
+		if loc := refreshURLRe.FindStringIndex(content); loc != nil {
+			return resolveRef(base, strings.Trim(strings.TrimSpace(content[loc[1]:]), `"'`))
 		}
 	}
 	if m := jsRedirectRe.FindSubmatch(body); m != nil {
@@ -439,8 +448,12 @@ func splitURL(raw string) (host string, port int, ok bool) {
 	}
 	host = u.Hostname()
 	if ps := u.Port(); ps != "" {
+		// The portal writes this URL. A port pf cannot take would fail the
+		// gap's whole ruleset, so one out of range is treated like one that
+		// does not parse: the host stands, on the default ports. Found by
+		// FuzzSplitURL.
 		p, err := strconv.Atoi(ps)
-		if err != nil {
+		if err != nil || p < 1 || p > 65535 {
 			return host, 0, host != ""
 		}
 		return host, p, true
@@ -466,7 +479,13 @@ func snippet(body []byte) string {
 	const n = 240
 	s := strings.Join(strings.Fields(string(body)), " ")
 	if len(s) > n {
-		return s[:n] + "..."
+		// Back off to a character boundary: a byte cut can split one, and
+		// the half left over is not text.
+		cut := n
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		return s[:cut] + "..."
 	}
 	return s
 }

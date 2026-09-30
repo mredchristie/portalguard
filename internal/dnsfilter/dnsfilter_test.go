@@ -325,3 +325,15 @@ func TestTraceSeesEveryQuery(t *testing.T) {
 		}
 	}
 }
+
+// TestDottedLabelIsNotTheAllowedName: one wire label spelling an allowed
+// name is a different name to the resolver, and must not be forwarded as it.
+func TestDottedLabelIsNotTheAllowedName(t *testing.T) {
+	q := []byte{0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0}
+	q = append(q, byte(len("www.guestwifi.test")))
+	q = append(q, "www.guestwifi.test"...)
+	q = append(q, 0, 0, 1, 0, 1)
+	if name, ok := questionName(q); ok {
+		t.Fatalf("a single dotted label parsed as %q", name)
+	}
+}

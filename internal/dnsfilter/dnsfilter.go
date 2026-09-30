@@ -384,6 +384,12 @@ func (s *Server) serveTCP(ln net.Listener) {
 func (s *Server) handle(q []byte) []byte {
 	name, ok := questionName(q)
 	if !ok {
+		// A query that is not a plain hostname lookup is refused rather than
+		// ignored, so the app asking fails now instead of timing out. Too
+		// short to be a query at all, or a reply, gets nothing.
+		if len(q) >= 12 && q[2]&0x80 == 0 {
+			return refusal(q)
+		}
 		return nil
 	}
 	r, verdict := s.decide(q, name)
@@ -539,6 +545,14 @@ func questionName(q []byte) (string, bool) {
 		if l&0xC0 != 0 || i+l > len(q) {
 			return "", false
 		}
+		// Hostname characters only. A label may hold any byte on the wire,
+		// and some read as a different name once joined and normalised: the
+		// one label "cdn.guestwifi.test" looks exactly like the allowed
+		// three, and "test " like "test" once trimmed, while the resolver
+		// sees neither. Found by FuzzQuestionName.
+		if !hostLabel(q[i : i+l]) {
+			return "", false
+		}
 		labels = append(labels, string(q[i:i+l]))
 		i += l
 	}
@@ -599,6 +613,19 @@ func skipName(r []byte, i int) int {
 		i += l + 1
 	}
 	return -1
+}
+
+// hostLabel reports whether a label is made of hostname characters: letters,
+// digits, hyphens, and the underscore DNS service names use (_dns-sd).
+func hostLabel(b []byte) bool {
+	for _, c := range b {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // questionType names the record type asked for, for the trace.

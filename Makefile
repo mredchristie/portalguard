@@ -4,7 +4,7 @@ BIN_DIR  := bin
 VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS  := -X main.version=$(VERSION)
 
-.PHONY: all build install uninstall test vet fmt clean detect rescue e2e e2e-redact demo demo-allow testenv-up testenv-down testenv-logs hotspot-up hotspot-down hotspot-demo hotspot-known hotspot-auto preflight handoff-check dns-spike e2e-portal
+.PHONY: fuzz all build install uninstall test vet fmt clean detect rescue e2e e2e-redact demo demo-allow testenv-up testenv-down testenv-logs hotspot-up hotspot-down hotspot-demo hotspot-known hotspot-auto preflight handoff-check dns-spike e2e-portal
 
 all: vet test build
 
@@ -109,6 +109,18 @@ demo: build
 demo-allow: build
 	@echo "this needs root and CUTS THE NETWORK several times on purpose."
 	sudo ./testenv/demo-allow.sh
+
+# --- Fuzzing the parsers that read untrusted input -------------------------
+# Each target runs for FUZZTIME (default 30s). A crash is saved under the
+# package's testdata/fuzz and from then on runs with every `make test`.
+FUZZTIME ?= 30s
+fuzz:
+	go test -run '^$$' -fuzz '^FuzzHandle$$' -fuzztime $(FUZZTIME) ./internal/dnsfilter
+	go test -run '^$$' -fuzz '^FuzzQuestionName$$' -fuzztime $(FUZZTIME) ./internal/dnsfilter
+	go test -run '^$$' -fuzz '^FuzzAnswerAddrs$$' -fuzztime $(FUZZTIME) ./internal/dnsfilter
+	go test -run '^$$' -fuzz '^FuzzSiteOf$$' -fuzztime $(FUZZTIME) ./internal/state
+	go test -run '^$$' -fuzz '^FuzzMetaRefresh$$' -fuzztime $(FUZZTIME) ./internal/portal
+	go test -run '^$$' -fuzz '^FuzzSplitURL$$' -fuzztime $(FUZZTIME) ./internal/portal
 
 # --- The off-box hotspot (see testenv/README.md, "The off-box hotspot") ------
 # A BT-shaped portal across four containers, each on its own address on

@@ -28,13 +28,19 @@
 package main
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/binary"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"html/template"
 	"log"
+	"math/big"
 	"net"
 	"net/http"
 	"net/url"
@@ -93,7 +99,7 @@ func main() {
 		}
 		runReg(c)
 	case "net":
-		runNet()
+		runNet(c)
 	default:
 		log.Fatalf("unknown -role %q", c.role)
 	}
@@ -104,6 +110,9 @@ func main() {
 type portal struct {
 	config
 	authed atomic.Bool
+	// hostile is which attack is on: "" (none), "page" or "dns". See
+	// handleHostile.
+	hostile atomic.Value
 
 	// Names asked of this network's DNS since /dnsmark, which is how a test
 	// proves what left the machine during the gap: this server is the
@@ -147,6 +156,7 @@ func runWWW(c config) {
 	site.HandleFunc("/status", p.handleStatus)
 	site.HandleFunc("/dnsmark", p.handleDNSMark)
 	site.HandleFunc("/dnslog", p.handleDNSLog)
+	site.HandleFunc("/hostile", p.handleHostile)
 	site.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/login", http.StatusFound)
 	})
@@ -161,7 +171,47 @@ func (p *portal) handleIntercept(w http.ResponseWriter, r *http.Request) {
 		answerProbe(w, r)
 		return
 	}
+	if p.mode() == "page" {
+		// A 200 instead of a redirect, whose body leads with the bytes that
+		// once crashed detection (an invalid byte before url=, found by
+		// FuzzMetaRefresh) and a refresh to nowhere, with the real login
+		// behind them. Detection has to survive it and still find the login.
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprintf(w, "<html><head><metA0http-equiv=refreshContent=\"0\xc5url=\">"+
+			`<meta http-equiv="refresh" content="0; url=%s"></head><body>Sign in</body></html>`, p.loginURL())
+		return
+	}
 	http.Redirect(w, r, p.loginURL(), http.StatusFound)
+}
+
+// handleHostile turns an attack on or off: POST /hostile?mode=page|dns|off.
+//
+//	page: the interception page is malformed (see handleIntercept)
+//	dns:  cdn and reg resolve to net, which holds a certificate for them
+//	      that nothing trusts: remembered hosts must fail their check
+//
+// /reset turns it off again.
+func (p *portal) handleHostile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	mode := r.URL.Query().Get("mode")
+	if mode == "off" {
+		mode = ""
+	}
+	if mode != "" && mode != "page" && mode != "dns" {
+		http.Error(w, "mode is page, dns or off", http.StatusBadRequest)
+		return
+	}
+	p.hostile.Store(mode)
+	log.Printf("HOSTILE: %q", mode)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (p *portal) mode() string {
+	m, _ := p.hostile.Load().(string)
+	return m
 }
 
 func (p *portal) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -204,6 +254,7 @@ func (p *portal) handleAccept(w http.ResponseWriter, r *http.Request) {
 
 func (p *portal) handleReset(w http.ResponseWriter, r *http.Request) {
 	p.authed.Store(false)
+	p.hostile.Store("")
 	log.Print("RESET: intercepting again")
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -269,8 +320,14 @@ func (p *portal) resolve(name string) net.IP {
 	case p.host("www"):
 		return p.self
 	case p.host("cdn"):
+		if p.mode() == "dns" {
+			return p.inet
+		}
 		return p.cdn
 	case p.host("reg"):
+		if p.mode() == "dns" {
+			return p.inet
+		}
 		return p.reg
 	}
 	if p.authed.Load() {
@@ -398,11 +455,51 @@ func runReg(c config) {
 
 // ==== net: the internet, as far as the probes can tell ====================
 
-func runNet() {
+func runNet(c config) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", answerProbe)
 	log.Print("net: answering the connectivity probes")
+	// The impostor, for the dns attack: HTTPS for cdn and reg, under a
+	// certificate it signed itself. A remembered host verified against the
+	// system's trust store must refuse it.
+	go func() {
+		cert, err := selfSigned("cdn."+c.domain, "reg."+c.domain)
+		if err != nil {
+			log.Printf("net: no impostor certificate: %v", err)
+			return
+		}
+		srv := &http.Server{
+			Addr:              ":443",
+			Handler:           logging(mux),
+			ReadHeaderTimeout: 5 * time.Second,
+			TLSConfig:         &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
+		}
+		srv.SetKeepAlivesEnabled(false)
+		log.Fatal(srv.ListenAndServeTLS("", ""))
+	}()
 	serve(":80", mux)
+}
+
+// selfSigned makes a certificate for names that no trust store will accept.
+func selfSigned(names ...string) (tls.Certificate, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: names[0]},
+		DNSNames:     names,
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}, nil
 }
 
 // answerProbe is what the real probe endpoints serve.

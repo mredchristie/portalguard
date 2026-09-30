@@ -218,6 +218,11 @@ Verified on real hardware, and re-verified by `testenv/e2e.sh`:
 | Auto-allow cannot reopen a sealed gap | Unit test: the seal closes auto-allow first, and an answer arriving after it opens nothing |
 | Without the filter, auto-allow falls back to pf's log | Live against the hotspot with loopback skipped: `cdn` and `reg` opened from the log and the login completed |
 | A leftover `set skip on lo0` is cleared before the gap | Live: `install-anchor`, and now `run`, flush and reload pf; Internet Sharing (started by the hotspot's containers) was found to be one source, NordVPN's kill switch the other |
+| A remembered host is not opened on a lying DNS answer | `hotspot-demo.sh hostile-known`: cdn and reg pointed at an impostor with a self-signed certificate; both failed the check, stayed shut, and the login still completed |
+| A malformed portal page cannot stop detection | `hotspot-demo.sh hostile`: an interception page leading with the bytes that once crashed it, and an empty refresh, still yields the real login |
+| Auto-allow stops at 10 hosts, and nothing past the cap reaches the network | `hotspot-demo.sh hostile`: 15 more hosts asked for, 10 opened, the rest refused under every record type (the first run found their AAAA and HTTPS lookups leaking, now fixed) |
+| A DNS name disguised as an allowed one is refused | `hotspot-demo.sh hostile`: one label spelling `cdn.guestwifi.test` got REFUSED |
+| The parsers of untrusted input do not crash | `make fuzz`: six fuzz targets over DNS queries and replies, portal pages, redirect URLs and the site matcher; the four bugs they found are saved as regression inputs |
 | A stale session file cannot claim a gap the ruleset denies | Unit tests over every phase/snapshot pairing |
 | Detection survives a real portal | BT Wi-Fi, live: portal found, host pinned, non-standard port carried through, clean release |
 

@@ -4,7 +4,7 @@ BIN_DIR  := bin
 VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS  := -X main.version=$(VERSION)
 
-.PHONY: fuzz all build install uninstall test vet fmt clean detect rescue e2e e2e-redact demo demo-allow testenv-up testenv-down testenv-logs hotspot-up hotspot-down hotspot-demo hotspot-known hotspot-auto preflight handoff-check dns-spike e2e-portal
+.PHONY: fuzz all build install uninstall test vet fmt clean detect rescue e2e e2e-redact demo demo-allow testenv-up testenv-down testenv-logs hotspot-up hotspot-down hotspot-demo hotspot-known hotspot-auto hotspot-hostile preflight handoff-check dns-spike e2e-portal
 
 all: vet test build
 
@@ -152,10 +152,17 @@ hotspot-auto: build
 	@echo "this needs root, CUTS THE NETWORK, and points DNS at the hotspot while it runs."
 	sudo ./testenv/hotspot-demo.sh auto
 
+# A portal that attacks. hostile-known needs remembered hosts, so run
+# hotspot-demo first (preflight does both in the right order).
+hotspot-hostile: build
+	@echo "this needs root, CUTS THE NETWORK, and points DNS at the hotspot while it runs."
+	sudo ./testenv/hotspot-demo.sh hostile-known
+	sudo ./testenv/hotspot-demo.sh hostile
+
 # Before a field test: unit tests, then every hotspot run back to back, with a
 # verdict per suite. Brings the hotspot up and takes it down again.
 preflight: build
-	@echo "this needs root, CUTS THE NETWORK several times, and takes about two minutes."
+	@echo "this needs root, CUTS THE NETWORK several times, and takes about three minutes."
 	./testenv/preflight.sh
 
 # --- The VPN handover ----------------------------------------------------------

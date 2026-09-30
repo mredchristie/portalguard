@@ -133,9 +133,37 @@ func newAutoAllow(s *Session, site string) *autoAllow {
 	return &autoAllow{s: s, site: site, opened: map[string]bool{}, have: map[string]bool{}}
 }
 
-// Wants is the cheap test, made for every name the filter would refuse.
+// Wants is asked about every name the filter would refuse, and a yes sends
+// the query to the network. So it is a yes only for a name that is open or
+// can still be opened: past the cap, a host's AAAA and HTTPS lookups were
+// forwarded although its A answer would never be opened, and the network
+// heard names it should not have. Found by the hostile hotspot.
 func (a *autoAllow) Wants(name string) bool {
-	return sameSite(name, a.site) && a.s.machine.Can(EventExtendGap)
+	if !sameSite(name, a.site) || !a.s.machine.Can(EventExtendGap) {
+		return false
+	}
+	name = normalizeHost(name)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed {
+		return false
+	}
+	if a.opened[name] || len(a.opened) < maxAutoAllow {
+		return true
+	}
+	// Said here, the first time a host is turned away, because past the cap
+	// nothing reaches Open to say it: otherwise auto-allow would stop with
+	// no word as to why.
+	a.noteCap()
+	return false
+}
+
+// noteCap says, once, that the cap has been reached. The caller holds a.mu.
+func (a *autoAllow) noteCap() {
+	if !a.capped {
+		a.capped = true
+		a.s.logf("opened %d hosts automatically; anything more has to be allowed by hand", maxAutoAllow)
+	}
 }
 
 // Open widens the gap for name, pinned to the addresses the filter was just
@@ -148,10 +176,7 @@ func (a *autoAllow) Open(name string, addrs []net.IP) error {
 		return errAutoClosed
 	}
 	if !a.opened[name] && len(a.opened) >= maxAutoAllow {
-		if !a.capped {
-			a.capped = true
-			a.s.logf("opened %d hosts automatically; anything more has to be allowed by hand", maxAutoAllow)
-		}
+		a.noteCap()
 		return errAutoCap
 	}
 	if a.opened[name] && a.haveAll(addrs) {

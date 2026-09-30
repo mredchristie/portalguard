@@ -337,3 +337,35 @@ func TestDottedLabelIsNotTheAllowedName(t *testing.T) {
 		t.Fatalf("a single dotted label parsed as %q", name)
 	}
 }
+
+// TestAnswerAddrsReadsHTTPSHints: an HTTPS record's address hints are
+// addresses the browser may connect to, so they are opened like A and AAAA.
+func TestAnswerAddrsReadsHTTPSHints(t *testing.T) {
+	r := reply(query(1, "cdn.guestwifi.test"), 0)
+	binary.BigEndian.PutUint16(r[6:8], 1)
+	v6 := net.ParseIP("2001:db8::7")
+	var d []byte
+	d = append(d, 0, 1, 0)                                    // priority 1, target "."
+	d = append(d, 0, 1, 0, 3, 2, 'h', '2')                    // alpn=h2: not an address
+	d = append(d, 0, 4, 0, 8, 203, 0, 113, 7, 203, 0, 113, 8) // ipv4hint, two
+	d = append(d, 0, 6, 0, 16)                                // ipv6hint, one
+	d = append(d, v6...)
+	r = append(r, 0xC0, 0x0C, 0, 65, 0, 1, 0, 0, 0, 60, byte(len(d)>>8), byte(len(d)))
+	r = append(r, d...)
+
+	got := answerAddrs(r)
+	want := []net.IP{net.IPv4(203, 0, 113, 7), net.IPv4(203, 0, 113, 8), v6}
+	if len(got) != len(want) {
+		t.Fatalf("answerAddrs = %v, want %v", got, want)
+	}
+	for i := range want {
+		if !got[i].Equal(want[i]) {
+			t.Fatalf("answerAddrs = %v, want %v", got, want)
+		}
+	}
+	// A hint list that is not a whole number of addresses is ignored.
+	bad := append([]byte{0, 1, 0}, 0, 4, 0, 5, 1, 2, 3, 4, 5)
+	if h := svcbHints(bad); len(h) != 0 {
+		t.Fatalf("svcbHints took %v from a ragged list", h)
+	}
+}

@@ -8,6 +8,9 @@
 #   sudo ./testenv/hotspot-demo.sh auto     # auto-allow: the page renders first time, no allow
 #   sudo ./testenv/hotspot-demo.sh          # without it: blank page, allow, remember, login
 #   sudo ./testenv/hotspot-demo.sh known    # next visit: remembered hosts open themselves
+#   sudo ./testenv/hotspot-demo.sh hostile        # a portal that attacks: malformed page,
+#                                                 # too many hosts, a disguised DNS name
+#   sudo ./testenv/hotspot-demo.sh hostile-known  # DNS lies about remembered hosts
 #
 # first and known run with -no-auto-allow: they prove the paths auto-allow
 # falls back to, which it would otherwise hide.
@@ -39,7 +42,10 @@ WAIT=60s
 # network during the gap.
 RUN_FLAGS=""
 [ "${DNS_FILTER:-on}" = off ] && RUN_FLAGS="-no-dns-filter"
-[ "$ACT" != auto ] && RUN_FLAGS="$RUN_FLAGS -no-auto-allow"
+case "$ACT" in
+    auto | hostile) ;;
+    *) RUN_FLAGS="$RUN_FLAGS -no-auto-allow" ;;
+esac
 # run always writes a trace: it is how the verdict knows the run really went
 # from lockdown to SEALED. TRACE=file keeps it somewhere of your choosing.
 RUNTRACE=${TRACE:-$(mktemp -t portalguard-demo-trace)}
@@ -85,11 +91,17 @@ trap 'exit 130' INT TERM
 curl -s -m 3 -X POST -o /dev/null "http://$WWW:8443/reset"
 # The DNS log file is this run's only once the gap's /dnsmark recreates it.
 rm -f "$DIR/dnslog"
+# The attack is on before run starts: detection is part of what it tests.
+case "$ACT" in
+    hostile) curl -s -m 3 -X POST -o /dev/null "http://$WWW:8443/hostile?mode=page" ;;
+    hostile-known) curl -s -m 3 -X POST -o /dev/null "http://$WWW:8443/hostile?mode=dns" ;;
+esac
 
 # A first visit means a network this Mac does not know yet, so forget the
 # hotspot's hosts from any earlier known-network run. Otherwise they open
 # themselves and the blank page never happens.
-if [ "$ACT" != known ] && [ -f /etc/portalguard/known-networks.json ]; then
+case "$ACT" in known | hostile-known) forget=no ;; *) forget=yes ;; esac
+if [ "$forget" = yes ] && [ -f /etc/portalguard/known-networks.json ]; then
     python3 - "$DOMAIN" <<'PY'
 import json, sys
 path = "/etc/portalguard/known-networks.json"
@@ -262,11 +274,56 @@ auto_visit() {
     banner "back to the first terminal"
 }
 
+hostile_visit() {
+    wait_for_gap || return 0
+    curl -s -m 2 -o /dev/null -X POST "http://$WWW:8443/dnsmark"
+    sleep 3
+    banner "browser: a portal that fights back"
+    page=$(fetch "http://www.$DOMAIN:8443/login")
+    js=$(fetch "http://cdn.$DOMAIN/site.js")
+    echo "page: $page, site.js: $js  <- found behind a malformed interception page"
+    check "login page reachable behind a malformed interception page" "$page" loaded
+    check "auto-allow still opens the portal's own cdn under attack" "$js" loaded
+    # The page preconnects to reg first, as the real one does; then asks
+    # for fifteen more of its own hosts. Auto-allow stops at ten, cdn and reg
+    # included, and refuses the rest outright: none of their lookups, of any
+    # type, may reach the network.
+    fetch "http://reg.$DOMAIN/" >/dev/null
+    i=1
+    while [ $i -le 15 ]; do
+        fetch "http://h$i.$DOMAIN/" >/dev/null
+        i=$((i + 1))
+    done
+    echo "asked for h1 to h15.$DOMAIN"
+    # The disguised name: one DNS label spelling the allowed cdn name.
+    dotted=$(lookup "cdn\\.$DOMAIN")
+    echo "one label 'cdn.$DOMAIN': ${dotted:-no answer}  <- not the cdn, whatever it spells"
+    check "a single label spelling an allowed name is refused" "$dotted" REFUSED
+    result=$(login)
+    check "login still completes under attack" "$result" "logged in"
+    banner "back to the first terminal"
+}
+
+hostile_known_visit() {
+    wait_for_gap || return 0
+    curl -s -m 2 -o /dev/null -X POST "http://$WWW:8443/dnsmark"
+    sleep 3
+    banner "browser: remembered hosts, but the network lies about them"
+    js=$(fetch "http://cdn.$DOMAIN/site.js")
+    echo "site.js: $js  <- cdn now resolves to an impostor with a self-signed certificate"
+    check "a remembered host with a lying address stays shut" "$js" blocked
+    # Log in without cdn or reg, so the run can seal.
+    curl -s -m 3 -X POST -o /dev/null "http://$WWW:8443/accept"
+    banner "back to the first terminal"
+}
+
 case "$ACT" in
     first) first_visit & ;;
     known) known_visit & ;;
     auto) auto_visit & ;;
-    *) echo "usage: $0 [first|known|auto] [auto|human]"; exit 64 ;;
+    hostile) hostile_visit & ;;
+    hostile-known) hostile_known_visit & ;;
+    *) echo "usage: $0 [first|known|auto|hostile|hostile-known] [auto|human]"; exit 64 ;;
 esac
 BROWSER=$!
 
@@ -281,6 +338,24 @@ check "run noticed the login and sealed" "$status" 0
 # went the whole way.
 if grep -q -- '--SEAL--> SEALED' "$RUNTRACE" 2>/dev/null; then sealed=yes; else sealed=no; fi
 check "run went from lockdown to SEALED" "$sealed" yes
+
+# What the attacks should have left in the run's own record.
+yn() { if "$@"; then echo yes; else echo no; fi; }
+case "$ACT" in
+    hostile)
+        check "detection found the real login behind the malformed page" \
+            "$(yn grep -q "PORTAL_FOUND (www.$DOMAIN)" "$RUNTRACE")" yes
+        autos=$(grep 'dns   auto' "$RUNTRACE" | awk '{print $NF}' | sort -u | wc -l | tr -d ' ')
+        echo "hosts opened automatically: $autos"
+        check "auto-allow stopped at its cap of 10" "$(yn [ "$autos" -le 10 ])" yes
+        check "and said so" "$(yn grep -q 'anything more has to be allowed by hand' "$RUNTRACE")" yes
+        ;;
+    hostile-known)
+        check "the impostor's certificate was rejected" "$(yn grep -q 'did not verify' "$RUNTRACE")" yes
+        check "no remembered host opened on a lying answer" \
+            "$(yn grep -q 'known network, TLS verified)' "$RUNTRACE")" no
+        ;;
+esac
 
 # What the network's resolver heard during the gap. The hotspot is the
 # network, so a name it never heard never left this machine.
@@ -302,13 +377,17 @@ else
         sleep 1
     done
 fi
+opened=$(grep 'dns   auto' "$RUNTRACE" 2>/dev/null | awk '{print $NF}' | sort -u | tr '\n' ' ')
 leaked=$(printf '%s' "$dnslog" | python3 -c '
 import json, sys
 login = {"www.guestwifi.test", "cdn.guestwifi.test", "reg.guestwifi.test",
          "captive.apple.com", "connectivitycheck.gstatic.com"}
+# Hosts auto-allow opened are the login too, and only those: the trace says
+# which. A host it refused must not appear under any record type.
+opened = set(sys.argv[1].split())
 names = json.load(sys.stdin) or []  # an older hotspot says null for none
-print(" ".join(sorted(n for n in names if n not in login)) or "none")
-' 2>/dev/null || echo "unreadable")
+print(" ".join(sorted(n for n in names if n not in login and n not in opened)) or "none")
+' "$opened" 2>/dev/null || echo "unreadable")
 echo "DNS that reached the network during the gap, beyond the login's own names: $leaked"
 check "no other app's DNS left the machine during the gap" "$leaked" none
 

@@ -160,3 +160,14 @@ func parsePorts(s string) ([]int, error) {
 	}
 	return out, nil
 }
+
+// clearLoopbackSkipForRun clears a `set skip on lo0` before run locks down,
+// so the DNS filter can run. It is the state a VPN kill switch leaves behind
+// the moment you disconnect it to log in, which is exactly when run starts.
+// Returns whether it changed anything.
+func clearLoopbackSkipForRun(ctx context.Context) (bool, error) {
+	if !pf.LoopbackSkipped(ctx) {
+		return false, nil
+	}
+	return true, pf.ClearLoopbackSkip(ctx)
+}

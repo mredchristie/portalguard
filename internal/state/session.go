@@ -65,6 +65,8 @@ type Session struct {
 	// so a login stuck on another domain (a payment page) can be spotted
 	// while it is happening. See UseVerboseDNS.
 	dnsVerbose bool
+	// dnsTrace is told about every query the filter answers. See UseDNSTrace.
+	dnsTrace func(name, qtype, verdict string)
 
 	// gapMu is held across AllowExtra's check-and-open and across Seal and
 	// Release, so a host added from inside this process (the prompt) can

@@ -147,6 +147,10 @@ type Server struct {
 	Policy    *Policy
 	// Logf, if set, is told about each refusal the first time a name is seen.
 	Logf func(format string, args ...any)
+	// Trace, if set, is told about every query and what became of it:
+	// "forwarded", "auto" (forwarded and opened), "refused" or "servfail".
+	// For reviewing a real network afterwards; Logf only sees first refusals.
+	Trace func(name, qtype, verdict string)
 	// Auto, if set, is asked about names the policy does not list, and can
 	// have them forwarded and opened as they are asked for. See AutoAllower.
 	Auto AutoAllower
@@ -382,10 +386,22 @@ func (s *Server) handle(q []byte) []byte {
 	if !ok {
 		return nil
 	}
+	r, verdict := s.decide(q, name)
+	if s.Trace != nil {
+		s.Trace(name, questionType(q), verdict)
+	}
+	return r
+}
+
+// decide answers one query and says what it did with it.
+func (s *Server) decide(q []byte, name string) ([]byte, string) {
 	if !s.Policy.Allowed(name) {
 		if s.Auto != nil && s.Auto.Wants(name) {
 			if r := s.autoAllow(q, name); r != nil {
-				return r
+				if r[3]&0x0F == 2 {
+					return r, "servfail"
+				}
+				return r, "auto"
 			}
 		}
 		s.mu.Lock()
@@ -395,16 +411,16 @@ func (s *Server) handle(q []byte) []byte {
 		if first && s.Logf != nil {
 			s.Logf("dns filter: refused %s", name)
 		}
-		return refusal(q)
+		return refusal(q), "refused"
 	}
 	s.mu.Lock()
 	s.forwarded[name]++
 	s.mu.Unlock()
 	r, err := s.forward(q)
 	if err != nil {
-		return servfail(q)
+		return servfail(q), "servfail"
 	}
-	return r
+	return r, "forwarded"
 }
 
 // autoAllow forwards a query Auto wants, opens the addresses in the answer,
@@ -583,6 +599,32 @@ func skipName(r []byte, i int) int {
 		i += l + 1
 	}
 	return -1
+}
+
+// questionType names the record type asked for, for the trace.
+func questionType(q []byte) string {
+	end := questionEnd(q)
+	if end > len(q) || end < 16 {
+		return "?"
+	}
+	t := binary.BigEndian.Uint16(q[end-4 : end-2])
+	switch t {
+	case 1:
+		return "A"
+	case 28:
+		return "AAAA"
+	case 65:
+		return "HTTPS"
+	case 5:
+		return "CNAME"
+	case 12:
+		return "PTR"
+	case 16:
+		return "TXT"
+	case 33:
+		return "SRV"
+	}
+	return fmt.Sprintf("TYPE%d", t)
 }
 
 // questionEnd is the offset just past the question section.

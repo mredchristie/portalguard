@@ -290,3 +290,38 @@ func TestAnswerAddrsFollowsCNAMEs(t *testing.T) {
 		t.Fatal("a refusal has no addresses")
 	}
 }
+
+// TestTraceSeesEveryQuery: the trace hears each query and its verdict, not
+// only the first refusal of each name as Logf does.
+func TestTraceSeesEveryQuery(t *testing.T) {
+	up := newFakeUpstream(t)
+	type ev struct{ name, qtype, verdict string }
+	got := make(chan ev, 8)
+	auto := &fakeAuto{wants: map[string]bool{"cdn.guestwifi.test": true}, opened: make(chan []net.IP, 1)}
+	s := &Server{
+		Upstreams:          []net.IP{net.IPv4(127, 0, 0, 1)},
+		Policy:             NewPolicy("", "www.guestwifi.test"),
+		Auto:               auto,
+		Trace:              func(n, q, v string) { got <- ev{n, q, v} },
+		ListenAddr:         "127.0.0.1:0",
+		UpstreamSourcePort: -1,
+		upstreamDst:        up.conn.LocalAddr().(*net.UDPAddr).Port,
+	}
+	if err := s.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Stop)
+
+	want := []ev{
+		{"www.guestwifi.test", "A", "forwarded"},
+		{"cdn.guestwifi.test", "A", "auto"},
+		{"imap.mail.me.com", "A", "refused"},
+		{"imap.mail.me.com", "A", "refused"},
+	}
+	for i, w := range want {
+		ask(t, s, uint16(i+1), w.name)
+		if e := <-got; e != w {
+			t.Errorf("trace %d = %+v, want %+v", i, e, w)
+		}
+	}
+}

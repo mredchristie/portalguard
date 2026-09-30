@@ -12,3 +12,5 @@ var errDarwinOnly = errors.New("this command is macOS-only; the pf backend does 
 func runInstallAnchor(context.Context, []string) int   { return fail(errDarwinOnly) }
 func runUninstallAnchor(context.Context, []string) int { return fail(errDarwinOnly) }
 func runPrintRules(context.Context, []string) int      { return fail(errDarwinOnly) }
+
+func clearLoopbackSkipForRun(context.Context) (bool, error) { return false, nil }

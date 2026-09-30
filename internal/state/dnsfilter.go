@@ -70,6 +70,7 @@ func (s *Session) StartDNSFilter(ctx context.Context) error {
 	knownPath := s.knownPath
 	autoOn := s.autoOn
 	verbose := s.dnsVerbose
+	trace := s.dnsTrace
 	s.mu.Unlock()
 
 	names := []string{res.PortalHost}
@@ -99,6 +100,7 @@ func (s *Session) StartDNSFilter(ctx context.Context) error {
 	if verbose {
 		srv.Logf = s.logf
 	}
+	srv.Trace = trace
 	var auto *autoAllow
 	site := autoAllowSite(res.PortalHost)
 	if autoOn && site != "" {
@@ -131,6 +133,14 @@ func (s *Session) StartDNSFilter(ctx context.Context) error {
 func (s *Session) UseVerboseDNS(on bool) {
 	s.mu.Lock()
 	s.dnsVerbose = on
+	s.mu.Unlock()
+}
+
+// UseDNSTrace has the filter report every query and its verdict to f.
+// Takes effect at StartDNSFilter.
+func (s *Session) UseDNSTrace(f func(name, qtype, verdict string)) {
+	s.mu.Lock()
+	s.dnsTrace = f
 	s.mu.Unlock()
 }
 

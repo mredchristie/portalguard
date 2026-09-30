@@ -629,9 +629,19 @@ flags:
 	noDNSFilter := fs.Bool("no-dns-filter", false, "let the gap's DNS go straight to the network's resolver, for every app, as v0.2 did")
 	noAutoAllow := fs.Bool("no-auto-allow", false, "never open the portal's own hosts automatically; suggest them for allow instead, as v0.3 did")
 	handoffWait := fs.Duration("handoff-wait", 3*time.Minute, "how long to wait for the VPN tunnel after sealing")
+	tracePath := fs.String("trace", "", "record everything this run prints, and every DNS query with what the filter did, timestamped, to this file (holds real hostnames)")
 	auditLog := fs.String("audit-log", "", "write the full, unredacted report to this file (never to stdout) - for verifying a -redact run against ground truth without displaying it")
 	if err := fs.Parse(args); err != nil {
 		return exitUsageError
+	}
+	// First, so a run that fails its preflight is on record too.
+	var tr *tracer
+	if *tracePath != "" {
+		var err error
+		if tr, err = startTrace(*tracePath, append([]string{"run"}, args...)); err != nil {
+			return fail(err)
+		}
+		defer tr.close()
 	}
 	// The VPN check comes before the root check on purpose: it is the more
 	// informative failure, and it is actionable without sudo.
@@ -650,6 +660,16 @@ flags:
 	fw := backend.New()
 	if ok, why := fw.Available(ctx); !ok {
 		return fail(fmt.Errorf("%s backend unavailable: %s", fw.Name(), why))
+	}
+
+	// Before anything is engaged: the fix flushes pf, which is only safe
+	// while nothing of ours is loaded.
+	if !*noDNSFilter {
+		if cleared, err := clearLoopbackSkipForRun(ctx); err != nil {
+			logf("pf skips loopback and it could not be cleared, so the DNS filter will be off: %v", err)
+		} else if cleared {
+			logf("pf was skipping loopback (a VPN kill switch or Internet Sharing leaves that behind); reset it so the DNS filter can run")
+		}
 	}
 
 	// From here on the firewall may be engaged, so the safety net matters.
@@ -682,6 +702,9 @@ flags:
 		// filter when it runs, from pf's log when it does not.
 		sess.UseAutoAllow(!*noAutoAllow)
 		sess.UseVerboseDNS(*verbose)
+		if tr != nil {
+			sess.UseDNSTrace(tr.dns)
+		}
 		if !*noDNSFilter {
 			if err := sess.StartDNSFilter(ctx); err != nil {
 				logf("dns filter off, so every app's lookups can reach the network during the gap: %v", err)

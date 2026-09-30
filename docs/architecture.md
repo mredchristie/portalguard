@@ -214,12 +214,23 @@ Verified on real hardware, and re-verified by `testenv/e2e.sh`:
 | pf can redirect this Mac's DNS to a local resolver | `make dns-spike`: queries straight at the router (UDP and TCP) and through mDNSResponder all diverted |
 | With the DNS filter, nothing but the login's names reaches the network's resolver | `make hotspot-demo`: the hotspot's resolver heard only the login's names; 65 other lookups refused on the machine. The control (`DNS_FILTER=off`) leaked 20 names |
 | The DNS filter holds on a real LAN, not only the hotspot | e2e PHASE F: 68 lookups refused, and pf counted no DNS leaving during the gap. PHASE B, filter off, leaked names in the same setup, NordVPN's own telemetry among them |
+| The portal's own hosts open as the page asks for them, and nothing else does | `make hotspot-auto`: `cdn` and `reg` opened with no `allow`, the page rendered first time, a lookalike domain was refused, and the resolver heard nothing beyond the login's names |
+| Auto-allow cannot reopen a sealed gap | Unit test: the seal closes auto-allow first, and an answer arriving after it opens nothing |
+| Without the filter, auto-allow falls back to pf's log | Live against the hotspot with loopback skipped: `cdn` and `reg` opened from the log and the login completed |
+| A leftover `set skip on lo0` is cleared before the gap | Live: `install-anchor`, and now `run`, flush and reload pf; Internet Sharing (started by the hotspot's containers) was found to be one source, NordVPN's kill switch the other |
 | A stale session file cannot claim a gap the ruleset denies | Unit tests over every phase/snapshot pairing |
 | Detection survives a real portal | BT Wi-Fi, live: portal found, host pinned, non-standard port carried through, clean release |
 
 ## What is not proven
 
 This section is the reason the document exists.
+
+**Auto-allow has not met a real portal.** Every run so far is the hotspot,
+whose login hosts sit neatly under one domain. A real portal may send its
+login through a CDN on another domain, a payment provider, or a host whose
+site `siteOf` gets wrong. Each of those falls back to the suggestion rather
+than failing open, which is proven by unit tests; how often it happens on
+real networks is not known yet.
 
 **The end-to-end test uses a gateway split.** A container runtime on macOS
 cannot give a portal that is off-box from the Mac: published ports are bound by

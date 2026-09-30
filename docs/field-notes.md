@@ -161,3 +161,20 @@ That report also asserted a cause it had never checked - it said the counters
 "could not be read" for any empty result, including a truthful zero. It now
 tracks how many samples were attempted and how many failed, and only blames
 the measurement when the measurement actually failed.
+
+### Next: EE WiFi (paid, by the hour)
+
+The first real test of auto-allow, and of a portal that takes payment. Before
+leaving: `make preflight` should end "ready for the field". On site:
+
+1. Disconnect the VPN, and quit its app.
+2. Join the network. Do not click anything in the popup macOS shows.
+3. `sudo portalguard run -verbose -trace ~/ee-trace.log`
+4. EE's own hosts should open by themselves. If the page stalls on a payment
+   step, the refused names are listed as they happen: type the payment host's
+   name into the same terminal and press Enter.
+5. Pay, log in, wait for SEALED, then connect the VPN when it says so.
+
+The trace keeps every line and every DNS verdict, timestamped, for writing
+up here afterwards.
+

@@ -61,7 +61,8 @@ host passes a fresh TLS certificate check.
 | `uninstall-anchor` | yes | Undo that. |
 
 Useful `run` flags: `-vpn host:port/proto` (a VPN on unusual ports),
-`-verbose` (every name refused, as it happens), `-no-auto-allow`,
+`-verbose` (every name refused, as it happens), `-trace file` (a
+timestamped record of the run and every DNS verdict), `-no-auto-allow`,
 `-no-handoff`, `-no-dns-filter`, `-redact` (share a report without naming
 your services).
 
@@ -97,6 +98,9 @@ On real pf, with a portal that is genuinely off the machine:
 - **Only the login's names leave during the gap.** The test portal's own DNS
   server heard nothing else, where the same run without the filter leaked 20
   names.
+- **The login page renders first time.** `make hotspot-auto`: the portal's
+  own hosts opened as the page asked for them, with no `allow`, and a
+  lookalike domain was still refused.
 - **A real portal.** BT Wi-Fi: blank page diagnosed, `allow` from a second
   terminal, logged in, sealed.
 
@@ -110,6 +114,7 @@ depends on the handover hole, roaming), is in
 make test          # unit tests, no root needed
 make e2e           # real pf; cuts the network on purpose (see testenv/README.md)
 make hotspot-demo  # a BT-shaped test portal in containers, off the machine
+make preflight     # every hotspot run back to back, before a field test
 ```
 
 ## Docs

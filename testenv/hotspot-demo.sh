@@ -40,6 +40,10 @@ WAIT=60s
 RUN_FLAGS=""
 [ "${DNS_FILTER:-on}" = off ] && RUN_FLAGS="-no-dns-filter"
 [ "$ACT" != auto ] && RUN_FLAGS="$RUN_FLAGS -no-auto-allow"
+# run always writes a trace: it is how the verdict knows the run really went
+# from lockdown to SEALED. TRACE=file keeps it somewhere of your choosing.
+RUNTRACE=${TRACE:-$(mktemp -t portalguard-demo-trace)}
+RUN_FLAGS="$RUN_FLAGS -trace $RUNTRACE"
 [ "$MODE" = human ] && WAIT=180s
 BIN=${BIN:-./bin/portalguard}
 DOMAIN=${DOMAIN:-guestwifi.test}
@@ -70,6 +74,7 @@ fi
 
 cleanup() {
     "$BIN" release >/dev/null 2>&1 || true
+    [ -n "${TRACE:-}" ] || rm -f "$RUNTRACE"
     ./testenv/hotspot.sh dns-off >/dev/null 2>&1 || true
 }
 # An interrupt must exit: a trap that only cleans up lets the script carry on
@@ -78,6 +83,8 @@ trap cleanup EXIT
 trap 'exit 130' INT TERM
 
 curl -s -m 3 -X POST -o /dev/null "http://$WWW:8443/reset"
+# The DNS log file is this run's only once the gap's /dnsmark recreates it.
+rm -f "$DIR/dnslog"
 
 # A first visit means a network this Mac does not know yet, so forget the
 # hotspot's hosts from any earlier known-network run. Otherwise they open
@@ -96,6 +103,22 @@ PY
 fi
 ./testenv/hotspot.sh dns-on >/dev/null
 grep -q "nameserver $WWW" /etc/resolv.conf || { echo "DNS did not take (is a VPN still connected?)"; exit 1; }
+
+# resolv.conf changing is not the resolver changing: macOS can take a moment
+# to follow it, and a run that starts inside that moment sees the real
+# internet, finds no portal, and has nothing to test. Wait until this Mac
+# itself sees the hotspot's portal.
+seen=""
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    rc=0
+    "$BIN" detect >/dev/null 2>&1 || rc=$?
+    if [ "$rc" = 10 ]; then
+        seen=yes
+        break
+    fi
+    sleep 1
+done
+[ -n "$seen" ] || { echo "this Mac does not see the hotspot's portal (detect exit $rc), so there is nothing to test"; exit 1; }
 
 banner() { printf '\n=== %s ===\n' "$1"; }
 
@@ -254,18 +277,31 @@ status=0
 kill "$BROWSER" 2>/dev/null || true
 wait "$BROWSER" 2>/dev/null || true
 check "run noticed the login and sealed" "$status" 0
+# Exit 0 also means "no portal, nothing to do". Only the trace says the run
+# went the whole way.
+if grep -q -- '--SEAL--> SEALED' "$RUNTRACE" 2>/dev/null; then sealed=yes; else sealed=no; fi
+check "run went from lockdown to SEALED" "$sealed" yes
 
 # What the network's resolver heard during the gap. The hotspot is the
-# network, so a name it never heard never left this machine. Released first:
-# the sealed lockdown would drop the request for the log itself.
-"$BIN" release >/dev/null 2>&1
-# Retried: straight after the release, the first request can still meet the
-# sealed ruleset's dropped state and time out.
-dnslog=""
-for _ in 1 2 3 4 5; do
-    dnslog=$(curl -s -f -m 3 "http://$WWW:8443/dnslog") && break
-    sleep 1
-done
+# network, so a name it never heard never left this machine.
+#
+# Read now, while run has left the Mac sealed, from the file the hotspot
+# writes into the folder it shares with this Mac. Asking over HTTP meant
+# releasing first, and every app that looked something up in the seconds
+# before the question arrived was counted as a gap leak (www.netflix.com and
+# www.google.com, in the first preflight). An older hotspot without the file
+# falls back to asking after the release.
+if [ -f "$DIR/dnslog" ]; then
+    dnslog=$(python3 -c 'import json, sys; print(json.dumps([l.strip() for l in open(sys.argv[1]) if l.strip()]))' "$DIR/dnslog")
+    "$BIN" release >/dev/null 2>&1
+else
+    "$BIN" release >/dev/null 2>&1
+    dnslog=""
+    for _ in 1 2 3 4 5; do
+        dnslog=$(curl -s -f -m 3 "http://$WWW:8443/dnslog") && break
+        sleep 1
+    done
+fi
 leaked=$(printf '%s' "$dnslog" | python3 -c '
 import json, sys
 login = {"www.guestwifi.test", "cdn.guestwifi.test", "reg.guestwifi.test",

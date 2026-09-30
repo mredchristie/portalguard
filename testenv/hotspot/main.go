@@ -57,6 +57,8 @@ type config struct {
 	inet   net.IP
 	secret string
 	certs  string
+	// dnslogFile mirrors the DNS log to disk; see recordDNS.
+	dnslogFile string
 }
 
 func main() {
@@ -70,6 +72,7 @@ func main() {
 	flag.StringVar(&inet, "net", env("NET_IP", ""), "www: where every other name resolves after login")
 	flag.StringVar(&c.secret, "secret", env("SECRET", ""), "shared by www and reg, so only reg can complete a login")
 	flag.StringVar(&c.certs, "certs", env("CERTS", "/pg/certs"), "directory holding cert.pem and key.pem; HTTPS is served only if present")
+	flag.StringVar(&c.dnslogFile, "dnslog-file", env("DNSLOG_FILE", "/pg/dnslog"), "www: also write the names heard since /dnsmark here, one per line, for a test to read off disk")
 	flag.Parse()
 	c.self, c.cdn, c.reg, c.inet = net.ParseIP(self), net.ParseIP(cdn), net.ParseIP(reg), net.ParseIP(inet)
 	if c.self == nil {
@@ -214,6 +217,9 @@ func (p *portal) handleStatus(w http.ResponseWriter, r *http.Request) {
 func (p *portal) handleDNSMark(w http.ResponseWriter, r *http.Request) {
 	p.logMu.Lock()
 	p.marked, p.dnsSeen = true, nil
+	if p.dnslogFile != "" {
+		_ = os.WriteFile(p.dnslogFile, nil, 0o644)
+	}
 	p.logMu.Unlock()
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -242,6 +248,16 @@ func (p *portal) recordDNS(name string) {
 		}
 	}
 	p.dnsSeen = append(p.dnsSeen, name)
+	// Written as heard, to the folder the Mac shares with this container.
+	// The test reads it while the Mac is still sealed: asking over HTTP
+	// means releasing first, and anything an app looks up in the seconds
+	// before the question arrives is then counted as a gap leak.
+	if p.dnslogFile != "" {
+		if f, err := os.OpenFile(p.dnslogFile, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644); err == nil {
+			fmt.Fprintln(f, name)
+			f.Close()
+		}
+	}
 }
 
 // ==== the DNS server ======================================================

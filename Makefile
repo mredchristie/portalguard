@@ -4,7 +4,7 @@ BIN_DIR  := bin
 VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS  := -X main.version=$(VERSION)
 
-.PHONY: all build install uninstall test vet fmt clean detect rescue e2e e2e-redact demo demo-allow testenv-up testenv-down testenv-logs hotspot-up hotspot-down hotspot-demo hotspot-known hotspot-auto handoff-check dns-spike e2e-portal
+.PHONY: all build install uninstall test vet fmt clean detect rescue e2e e2e-redact demo demo-allow testenv-up testenv-down testenv-logs hotspot-up hotspot-down hotspot-demo hotspot-known hotspot-auto preflight handoff-check dns-spike e2e-portal
 
 all: vet test build
 
@@ -139,6 +139,12 @@ hotspot-known: build
 hotspot-auto: build
 	@echo "this needs root, CUTS THE NETWORK, and points DNS at the hotspot while it runs."
 	sudo ./testenv/hotspot-demo.sh auto
+
+# Before a field test: unit tests, then every hotspot run back to back, with a
+# verdict per suite. Brings the hotspot up and takes it down again.
+preflight: build
+	@echo "this needs root, CUTS THE NETWORK several times, and takes about two minutes."
+	./testenv/preflight.sh
 
 # --- The VPN handover ----------------------------------------------------------
 # Proves the handover hole on the wire, with no VPN: during a handover a UDP

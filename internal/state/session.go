@@ -887,6 +887,10 @@ func parseIPs(ss []string) []net.IP {
 // keeps it in step with the primary service's DNS. It misses per-interface
 // resolvers that only scutil knows about, which is a gap worth closing before
 // v1 - a split-DNS setup could leave the portal's resolver out of the gap.
+// SystemResolvers is the machine's DNS servers, from /etc/resolv.conf: the
+// network's resolvers, which the DNS filter forwards to.
+func SystemResolvers() []net.IP { return systemResolvers() }
+
 func systemResolvers() []net.IP {
 	f, err := os.Open("/etc/resolv.conf")
 	if err != nil {

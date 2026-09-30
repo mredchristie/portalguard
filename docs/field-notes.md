@@ -167,6 +167,7 @@ the measurement when the measurement actually failed.
 The first real test of auto-allow, and of a portal that takes payment. Before
 leaving: `make preflight` should end "ready for the field". On site:
 
+0. At home: `sudo portalguard doctor` should say Ready.
 1. Disconnect the VPN, and quit its app.
 2. Join the network. Do not click anything in the popup macOS shows.
 3. `sudo portalguard run -verbose -trace ~/ee-trace.log`

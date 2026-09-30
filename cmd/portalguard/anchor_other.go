@@ -14,3 +14,7 @@ func runUninstallAnchor(context.Context, []string) int { return fail(errDarwinOn
 func runPrintRules(context.Context, []string) int      { return fail(errDarwinOnly) }
 
 func clearLoopbackSkipForRun(context.Context) (bool, error) { return false, nil }
+
+func pfFindings(context.Context, bool) []finding {
+	return []finding{{"fail", "no firewall backend on this platform", "portalguard runs on macOS for now"}}
+}

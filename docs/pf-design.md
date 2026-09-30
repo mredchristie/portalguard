@@ -429,11 +429,12 @@ service-discovery lookups that name the home network (`b._dns-sd._udp.home`).
 
 It covers both address families. The first e2e run on a real LAN found
 macOS sending every lookup to the router's IPv6 resolver, which an IPv4-only
-filter could neither answer nor forward, so the filter listens on `::1` too,
-forwards to IPv6 resolvers from the same fixed port, and pf redirects both
-families. (The IPv6 redirect is proven by `pfctl` parsing it and by that run
-working; the spike's direct IPv6 lookups have not yet met a network that
-listed an IPv6 resolver at the time.)
+filter could neither answer nor forward, so the filter listens on `::1` too
+and pf redirects both families. What it lets out, it forwards over IPv4: a
+network that hands out only IPv6 resolvers gets no filter, and the gap falls
+back to the machine-wide DNS hole (`doctor` says so). The IPv6 redirect is
+proven live: `make dns-spike`, on a network listing an IPv6 resolver,
+diverted direct IPv6 lookups over both UDP and TCP.
 
 **A VPN kill switch can switch it off, and that is detected.** No rule is
 applied on an interface pf skips, and NordVPN's kill switch loads a ruleset

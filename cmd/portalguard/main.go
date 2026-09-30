@@ -41,6 +41,7 @@ func commands() []command {
 	return []command{
 		{"detect", "probe the current network and classify it", runDetect},
 		{"check", "one HTTP request; prints internet: reachable or blocked", runCheck},
+		{"doctor", "is this Mac ready to run? read-only; more with sudo", runDoctor},
 		{"status", "show the firewall and state machine status", runStatus},
 		{"lockdown", "block all traffic (root)", runLockdown},
 		{"allow", "open the gap for the detected portal, or widen an open one (root)", runAllow},

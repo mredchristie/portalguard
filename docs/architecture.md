@@ -223,6 +223,7 @@ Verified on real hardware, and re-verified by `testenv/e2e.sh`:
 | Auto-allow stops at 10 hosts, and nothing past the cap reaches the network | `hotspot-demo.sh hostile`: 15 more hosts asked for, 10 opened, the rest refused under every record type (the first run found their AAAA and HTTPS lookups leaking, now fixed) |
 | A DNS name disguised as an allowed one is refused | `hotspot-demo.sh hostile`: one label spelling `cdn.guestwifi.test` got REFUSED |
 | The parsers of untrusted input do not crash | `make fuzz`: six fuzz targets over DNS queries and replies, portal pages, redirect URLs and the site matcher; the four bugs they found are saved as regression inputs |
+| pf redirects IPv6 DNS as well as IPv4 | `make dns-spike` on a network listing an IPv6 resolver: direct lookups to it over UDP and TCP both diverted |
 | A stale session file cannot claim a gap the ruleset denies | Unit tests over every phase/snapshot pairing |
 | Detection survives a real portal | BT Wi-Fi, live: portal found, host pinned, non-standard port carried through, clean release |
 
@@ -280,7 +281,9 @@ presenting the demo should not claim it shows the gap working.
 - The DNS filter against a real portal. It is proven against the off-box
   hotspot; a real network adds resolvers that behave differently, and portals
   whose pages load third-party names that will be refused until allowed. It
-  also runs only inside `run`, and does not cover IPv6 resolvers.
+  also runs only inside `run`. Lookups sent to an IPv6 resolver are caught
+  and filtered (proven by `make dns-spike`), but what it lets out goes over
+  IPv4, so an IPv6-only network gets no filter.
 - DHCP lease expiry mid-lockdown, IPv6-only networks, and roaming between
   networks while engaged.
 - Linux and Windows. The packages exist with their designs recorded in the

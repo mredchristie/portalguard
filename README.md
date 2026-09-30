@@ -49,6 +49,7 @@ host passes a fresh TLS certificate check.
 | --- | --- | --- |
 | `detect` | | Classify the network. Changes nothing. Exit code 0 open, 10 portal, 20 no network. |
 | `check` | | One request: prints `internet: reachable` or `blocked`. |
+| `doctor` | | Is this Mac ready to run? Read-only; checks the firewall too with sudo. |
 | `status` | yes | What pf is actually enforcing, and whether it is still in force. |
 | `run` | yes | The whole flow, from detection to handover. |
 | `lockdown` | yes | Block everything. |

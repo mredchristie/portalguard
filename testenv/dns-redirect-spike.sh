@@ -25,9 +25,12 @@ LOG=$(mktemp)
     || { echo "no rdr hook loaded. run: sudo ./bin/portalguard install-anchor"; exit 64; }
 # A ruleset that skips loopback - a VPN kill switch's; NordVPN leaves one
 # behind - means no redirect is ever applied on it.
-/sbin/pfctl -s Interfaces -v 2>/dev/null | grep -q '^lo0 (skip)' \
-    && { echo "pf is skipping loopback (a VPN kill switch's ruleset; NordVPN leaves one behind),"; \
-         echo "so DNS cannot be redirected. disconnect the VPN, then: sudo ./bin/portalguard install-anchor"; exit 64; }
+# Internet Sharing (started by the hotspot's containers) sets it too. Cleared
+# here rather than refused, as the hotspot tests do.
+if /sbin/pfctl -s Interfaces -v 2>/dev/null | grep -Eq '^[[:space:]]*lo0[[:space:]].*[(]skip[)]'; then
+    echo "pf is skipping loopback; clearing it..."
+    ./bin/portalguard install-anchor >/dev/null || exit 64
+fi
 RESOLVER=$(awk '/^nameserver/ && $2 ~ /^[0-9.]+$/ {print $2; exit}' /etc/resolv.conf)
 [ -n "$RESOLVER" ] || { echo "no IPv4 resolver in /etc/resolv.conf"; exit 1; }
 # An IPv6 resolver too, if the network hands one out: macOS may send every

@@ -251,3 +251,24 @@ func LeaveWiFi(ctx context.Context, ssid string, forget, open bool) error {
 	_, err = ns("-addpreferredwirelessnetworkatindex", dev, ssid, fmt.Sprint(index), "OPEN")
 	return err
 }
+
+// WiFiGateway is the router of the Wi-Fi network itself, whatever carries the
+// default route: with a VPN up, the default route's gateway is the tunnel's,
+// which has no hardware address and names no network.
+func WiFiGateway(ctx context.Context) (net.IP, error) {
+	dev, err := WiFiDevice(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, routePath, "-n", "get", "-ifscope", dev, "default").Output()
+	if err != nil {
+		return nil, fmt.Errorf("no default route on %s: %w", dev, err)
+	}
+	r, err := parseDefaultRoute(string(out))
+	if err != nil || r.Gateway == nil {
+		return nil, fmt.Errorf("no router on %s", dev)
+	}
+	return r.Gateway, nil
+}

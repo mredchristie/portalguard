@@ -41,3 +41,19 @@ export function Rejoin(arg1) {
 export function Release() {
   return window['go']['main']['App']['Release']();
 }
+
+export function Settings() {
+  return window['go']['main']['App']['Settings']();
+}
+
+export function Trust(arg1) {
+  return window['go']['main']['App']['Trust'](arg1);
+}
+
+export function Untrust(arg1) {
+  return window['go']['main']['App']['Untrust'](arg1);
+}
+
+export function UseVPN(arg1) {
+  return window['go']['main']['App']['UseVPN'](arg1);
+}

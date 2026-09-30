@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -36,6 +37,13 @@ for any other, the handover asks you to connect it.
 			return fail(err)
 		}
 		chosen, _ := state.LoadVPNChoice(state.VPNChoicePath)
+		if len(args) > 1 && args[1] == "-json" {
+			if ss == nil {
+				ss = []vpn.Service{}
+			}
+			_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"services": ss, "chosen": chosen.ID})
+			return exitOK
+		}
 		if len(ss) == 0 {
 			fmt.Println("macOS knows no VPNs portalguard can start.")
 			return exitOK

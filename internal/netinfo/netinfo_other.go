@@ -37,3 +37,6 @@ func IsPreferred(context.Context, string) (bool, error) { return false, ErrUnsup
 
 // LeaveWiFi is not implemented off macOS.
 func LeaveWiFi(context.Context, string, bool, bool) error { return ErrUnsupported }
+
+// WiFiGateway is not implemented off macOS.
+func WiFiGateway(context.Context) (net.IP, error) { return nil, ErrUnsupported }

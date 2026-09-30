@@ -647,12 +647,95 @@
     ],
   };
 
+  // ==== settings ===========================================================
+
+  const setEl = document.querySelector('[data-settings]');
+  const setBody = document.querySelector('[data-settings-body]');
+  let settings = null;
+
+  const DEMO_SETTINGS = {
+    helper: true,
+    trust: { current: 'b4:ba:9d:d6:59:e9', networks: [{ gateway_mac: 'b4:ba:9d:d6:59:e9', label: 'home' }] },
+    vpn: { chosen: '887B', services: [{ id: '887B', name: 'My VPN', kind: 'com.wireguard.macos' }] },
+  };
+
+  function openSettings() {
+    app.classList.add('is-settings');
+    setEl.hidden = false;
+    loadSettings();
+  }
+  function closeSettings() {
+    app.classList.remove('is-settings');
+    setEl.hidden = true;
+    if (engine) engine.Doctor().then((fs) => { st.doctor = fs; draw(); }).catch(() => {});
+  }
+  function loadSettings(note) {
+    const got = engine ? engine.Settings() : Promise.resolve(DEMO_SETTINGS);
+    got.then((s) => {
+      settings = s;
+      drawSettings(note);
+    });
+  }
+
+  function drawSettings(note) {
+    const s = settings || {};
+    const trust = s.trust || { networks: [] };
+    const nets = trust.networks || [];
+    const here = nets.find((n) => n.gateway_mac === trust.current);
+    const vpn = s.vpn || { services: [] };
+    const services = vpn.services || [];
+
+    const thisNet = !trust.current
+      ? `<p class="quiet">Not on a network right now.</p>`
+      : here
+        ? `<div class="set-row on"><span>This network is trusted<small>as "${esc(here.label || 'trusted')}"</small></span></div>`
+        : `<p class="quiet">Trust the network you are on (home, work), and Arm stands down here instead of locking down.</p>
+           <div class="trust-form"><input class="pw" data-trust-label placeholder="Name it, e.g. home" /><button class="mini" data-trust>Trust</button></div>`;
+
+    const list = nets.length
+      ? nets.map((n) => `<div class="set-row"><span>${esc(n.label || 'unnamed')}<small>router ${esc(n.gateway_mac)}</small></span><button class="ghost" data-untrust="${esc(n.gateway_mac)}">Remove</button></div>`).join('')
+      : `<p class="quiet">None yet.</p>`;
+
+    const vpnRows = [{ id: '', name: 'Ask me to connect it' }, ...services].map((v) => {
+      const on = (vpn.chosen || '') === v.id;
+      return `<div class="set-row pick${on ? ' on' : ''}" data-vpn="${esc(v.name)}" data-vpn-id="${esc(v.id)}"><i class="radio"></i><span>${esc(v.name)}${v.kind ? `<small>${esc(v.kind)}</small>` : ''}</span></div>`;
+    }).join('');
+
+    setBody.innerHTML = `
+      <div class="set-group"><div class="label">This network</div>${thisNet}</div>
+      <div class="set-group"><div class="label">Trusted networks</div>${list}</div>
+      <div class="set-group"><div class="label">VPN at the handover</div>
+        <p class="quiet small">Once you are logged in, PortalGuard can start one of these itself, through a hole one server wide.</p>
+        ${vpnRows}</div>
+      <p class="doc lvl-${s.helper ? 'ok' : 'warn'}"><i></i>${s.helper ? 'Helper installed: no password needed' : 'No helper: each change asks for your Mac password'}</p>
+      ${note ? `<p class="note">${esc(note)}</p>` : ''}`;
+  }
+
+  function change(p, done) {
+    p.then(() => loadSettings(done)).catch((e) => loadSettings(String(e)));
+  }
+
+  document.querySelector('[data-open-settings]').addEventListener('click', openSettings);
+  document.querySelector('[data-close-settings]').addEventListener('click', closeSettings);
+  setBody.addEventListener('click', (e) => {
+    if (!engine) return;
+    if (e.target.closest('[data-trust]')) {
+      const label = (setBody.querySelector('[data-trust-label]').value || 'home').trim();
+      change(engine.Trust(label), `Trusted as "${label}".`);
+    }
+    const un = e.target.closest('[data-untrust]');
+    if (un) change(engine.Untrust(un.dataset.untrust), 'Removed.');
+    const v = e.target.closest('[data-vpn]');
+    if (v) change(engine.UseVPN(v.dataset.vpnId ? v.dataset.vpn : ''), v.dataset.vpnId ? `The handover will start ${v.dataset.vpn}.` : 'The handover will ask you to connect.');
+  });
+
   const q = new URLSearchParams(location.search);
   if (!engine) {
     st.doctor = DEMO_DOCTOR;
     st.scan = q.has('ask') ? { location: 'ask', power: true, networks: [] } : DEMO_SCAN;
     if (q.has('pick')) st.selected = q.get('pick');
   }
+  if (!engine && q.has('settings')) openSettings();
   if (!engine && q.has('demo')) {
     demo(q.has('at') ? Number(q.get('at')) : undefined);
   } else {

@@ -21,3 +21,11 @@ export function OpenURL(arg1:string):Promise<void>;
 export function Rejoin(arg1:string):Promise<void>;
 
 export function Release():Promise<void>;
+
+export function Settings():Promise<Record<string, any>>;
+
+export function Trust(arg1:string):Promise<void>;
+
+export function Untrust(arg1:string):Promise<void>;
+
+export function UseVPN(arg1:string):Promise<void>;

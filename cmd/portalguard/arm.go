@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -226,6 +227,7 @@ func armedDetect(ctx context.Context, sess *state.Session, g *guide, note func(s
 func runTrust(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("trust", flag.ContinueOnError)
 	list := fs.Bool("list", false, "list trusted networks instead")
+	asJSON := fs.Bool("json", false, "with -list: as JSON, with the current network's router, for the app")
 	fs.Usage = func() {
 		fmt.Fprint(os.Stderr, `usage: portalguard trust [label]
 
@@ -239,6 +241,20 @@ flags:
 	}
 	if err := fs.Parse(args); err != nil {
 		return exitUsageError
+	}
+	if *list && *asJSON {
+		mac, _ := currentGatewayMAC(ctx)
+		ns := state.LoadTrusted(state.TrustedPath)
+		out := struct {
+			Current  string                 `json:"current"`
+			Networks []state.TrustedNetwork `json:"networks"`
+		}{Current: mac, Networks: []state.TrustedNetwork{}}
+		for _, tn := range ns {
+			out.Networks = append(out.Networks, tn)
+		}
+		sort.Slice(out.Networks, func(i, j int) bool { return out.Networks[i].AddedAt.Before(out.Networks[j].AddedAt) })
+		_ = json.NewEncoder(os.Stdout).Encode(out)
+		return exitOK
 	}
 	if *list {
 		ns := state.LoadTrusted(state.TrustedPath)
@@ -290,12 +306,18 @@ func runUntrust(ctx context.Context, args []string) int {
 	return exitOK
 }
 
+// currentGatewayMAC is the hardware address of this network's router: the
+// Wi-Fi's own, so a VPN carrying the default route does not hide it.
 func currentGatewayMAC(ctx context.Context) (string, error) {
-	r, err := netinfo.Default(ctx)
-	if err != nil || r.Gateway == nil {
-		return "", errors.New("not on a network: join the one you want to trust first")
+	gw, err := netinfo.WiFiGateway(ctx)
+	if err != nil {
+		r, derr := netinfo.Default(ctx)
+		if derr != nil || r.Gateway == nil {
+			return "", errors.New("not on a network: join the one you want to trust first")
+		}
+		gw = r.Gateway
 	}
-	return netinfo.GatewayMAC(ctx, r.Gateway)
+	return netinfo.GatewayMAC(ctx, gw)
 }
 
 // runLeave takes the Mac off a Wi-Fi network PortalGuard joined and back to

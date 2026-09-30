@@ -65,6 +65,74 @@ func (a *App) startup(ctx context.Context) {
 // and releases the firewall: a closed app never leaves the network locked.
 func (a *App) shutdown(context.Context) { a.finish() }
 
+// Settings is what the settings screen shows: trusted networks and this
+// network's router, the VPNs the handover can start and the one chosen, and
+// whether the helper is installed. All of it is readable without root.
+func (a *App) Settings() (map[string]any, error) {
+	bin, err := engineBinary()
+	if err != nil {
+		return nil, err
+	}
+	read := func(args ...string) any {
+		out, err := exec.Command(bin, args...).Output()
+		if err != nil {
+			return nil
+		}
+		var v any
+		if json.Unmarshal(out, &v) != nil {
+			return nil
+		}
+		return v
+	}
+	return map[string]any{
+		"helper": helperUp(),
+		"trust":  read("trust", "-list", "-json"),
+		"vpn":    read("vpn", "list", "-json"),
+	}, nil
+}
+
+// Trust marks the network the Mac is on as trusted, with a label.
+func (a *App) Trust(label string) error { return privileged("trust", label) }
+
+// Untrust forgets a trusted network by its router's hardware address.
+func (a *App) Untrust(mac string) error { return privileged("untrust", mac) }
+
+// UseVPN chooses the VPN the handover starts; an empty name clears it.
+func (a *App) UseVPN(name string) error {
+	if name == "" {
+		return privileged("vpn", "clear")
+	}
+	return privileged("vpn", "use", name)
+}
+
+// privileged runs one engine command as root: through the helper when it is
+// installed, otherwise behind the password prompt.
+func privileged(args ...string) error {
+	if helperUp() {
+		out, code, err := runViaHelper(args...)
+		if err == nil && code != 0 {
+			err = errors.New(strings.TrimSpace(out))
+		}
+		return err
+	}
+	bin, err := engineBinary()
+	if err != nil {
+		return err
+	}
+	cmd := shq(bin)
+	for _, a := range args {
+		cmd += " " + shq(a)
+	}
+	script := "do shell script " + appleString(cmd) + " with administrator privileges"
+	if out, err := exec.Command("/usr/bin/osascript", "-e", script).CombinedOutput(); err != nil {
+		if strings.Contains(string(out), "-128") {
+			return errors.New("cancelled at the password prompt")
+		}
+		return errors.New(strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 // HelperInstalled tells the page whether arming will ask for a password.
 func (a *App) HelperInstalled() bool { return helperUp() }
 

@@ -150,6 +150,134 @@ body {
   border-color: rgba(255, 95, 122, 0.4);
 }
 
+/* ==== settings ============================================================ */
+
+.top-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.gear,
+.back {
+  background: none;
+  border: 0;
+  color: var(--muted);
+  cursor: pointer;
+  --wails-draggable: no-drag;
+  transition: color 0.2s, transform 0.4s var(--ease);
+}
+.gear svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linejoin: round;
+}
+.gear:hover {
+  color: var(--text);
+  transform: rotate(45deg);
+}
+.app.is-settings .gear {
+  display: none;
+}
+.app.is-settings > :not(.top):not(.settings) {
+  display: none;
+}
+.settings {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  overflow-y: auto;
+  min-height: 0;
+  grid-row: 2 / -1;
+  animation: rise 0.4s var(--ease) both;
+}
+.back {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--sans);
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text);
+  padding: 0;
+  align-self: flex-start;
+}
+.back svg {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.set-group {
+  display: grid;
+  gap: 8px;
+}
+.set-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 11px 12px;
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--faint);
+  font-size: 13px;
+}
+.set-row small {
+  display: block;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+.set-row.on {
+  border-color: rgba(0, 255, 136, 0.45);
+  background: rgba(0, 255, 136, 0.06);
+}
+.set-row .radio {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid var(--faint);
+  flex-shrink: 0;
+}
+.set-row.on .radio {
+  border-color: var(--green);
+  background: radial-gradient(circle, var(--green) 40%, transparent 45%);
+}
+.set-row.pick {
+  cursor: pointer;
+  justify-content: flex-start;
+}
+.ghost {
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--faint);
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+.ghost:hover {
+  color: var(--red);
+  border-color: rgba(255, 95, 122, 0.4);
+}
+.trust-form {
+  display: flex;
+  gap: 8px;
+}
+.trust-form .pw {
+  margin: 0;
+  flex: 1;
+}
+
 /* ==== the ring =========================================================== */
 
 .hero {
@@ -814,4 +942,8 @@ body {
     animation: none !important;
     transition: none !important;
   }
+}
+
+.set-group + .set-group {
+  margin-top: 8px;
 }

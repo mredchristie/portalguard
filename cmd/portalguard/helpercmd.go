@@ -51,6 +51,14 @@ func viaHelper(args []string) bool {
 		return false
 	}
 	need := rootCommands[args[0]] || (args[0] == "vpn" && len(args) > 1 && (args[1] == "use" || args[1] == "clear"))
+	// Listing trusted networks reads a file anyone may read.
+	if args[0] == "trust" {
+		for _, a := range args[1:] {
+			if a == "-list" || a == "--list" {
+				need = false
+			}
+		}
+	}
 	if !need {
 		return false
 	}
@@ -381,12 +389,24 @@ func runInstallHelper(ctx context.Context, args []string) int {
 	if err := os.WriteFile(helperPlist, []byte(plist), 0o644); err != nil {
 		return fail(err)
 	}
-	_ = exec.Command("/bin/launchctl", "bootout", "system/"+helperLabel).Run()
-	if out, err := exec.Command("/bin/launchctl", "bootstrap", "system", helperPlist).CombinedOutput(); err != nil {
+	// bootout returns before the old helper has gone, and bootstrapping over
+	// one still leaving fails ("Bootstrap failed: 5: Input/output error"):
+	// wait until launchd no longer knows it, then start, retrying a little.
+	stopHelper()
+	var out []byte
+	for i := 0; i < 5; i++ {
+		out, err = exec.Command("/bin/launchctl", "bootstrap", "system", helperPlist).CombinedOutput()
+		if err == nil {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+	if err != nil {
 		return fail(fmt.Errorf("launchctl bootstrap: %v: %s", err, strings.TrimSpace(string(out))))
 	}
 	for i := 0; i < 50; i++ {
-		if _, err := os.Stat(helper.SocketPath); err == nil {
+		if c, err := net.Dial("unix", helper.SocketPath); err == nil {
+			c.Close()
 			fmt.Printf("Installed. PortalGuard runs as root in the background now, for your account only:\n")
 			fmt.Printf("the app and `%s arm`, `run`, `status`... need no password or sudo.\n", filepath.Base(invokedAs()))
 			fmt.Printf("After updating PortalGuard, run this again. To remove it: sudo %s uninstall-helper\n", invokedAs())
@@ -397,11 +417,22 @@ func runInstallHelper(ctx context.Context, args []string) int {
 	return fail(fmt.Errorf("installed, but the helper did not start; see %s", helperLog))
 }
 
+// stopHelper unloads the helper and waits until launchd has let it go.
+func stopHelper() {
+	_ = exec.Command("/bin/launchctl", "bootout", "system/"+helperLabel).Run()
+	for i := 0; i < 50; i++ {
+		if exec.Command("/bin/launchctl", "print", "system/"+helperLabel).Run() != nil {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 func runUninstallHelper(ctx context.Context, args []string) int {
 	if err := requireRoot("uninstall-helper"); err != nil {
 		return fail(err)
 	}
-	_ = exec.Command("/bin/launchctl", "bootout", "system/"+helperLabel).Run()
+	stopHelper()
 	for _, p := range []string{helperPlist, helperBinary, helper.SocketPath, helper.ConfigPath} {
 		_ = os.Remove(p)
 	}

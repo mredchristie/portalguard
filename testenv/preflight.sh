@@ -38,6 +38,10 @@ suite "auto-allow: page renders first time" sudo TRACE="$TRACE" ./testenv/hotspo
 suite "trace records the DNS verdicts" grep -q 'dns   auto .*cdn.guestwifi.test' "$TRACE"
 suite "manual: blank page, allow, remember" sudo ./testenv/hotspot-demo.sh first
 suite "known network: remembered hosts verified" sudo ./testenv/hotspot-demo.sh known
+# The attacks. hostile-known needs the hosts the manual run remembered, so it
+# comes straight after known, before hostile forgets them.
+suite "hostile: DNS lies about remembered hosts" sudo ./testenv/hotspot-demo.sh hostile-known
+suite "hostile: malformed page, too many hosts, disguised name" sudo ./testenv/hotspot-demo.sh hostile
 
 printf '\n##### preflight #####\n'
 cat "$SUMMARY"

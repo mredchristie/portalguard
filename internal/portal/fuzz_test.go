@@ -38,3 +38,13 @@ func FuzzSplitURL(f *testing.F) {
 		}
 	})
 }
+
+// TestEmptyRefreshDoesNotHideTheLogin: a page leading with a refresh that
+// names nowhere still yields the real login page behind it.
+func TestEmptyRefreshDoesNotHideTheLogin(t *testing.T) {
+	body := []byte("<meta http-equiv=refresh content=\"0\xc5url=\">" +
+		`<meta http-equiv="refresh" content="0; url=http://www.guestwifi.test:8443/login">`)
+	if got := metaRefreshURL(body, "http://captive.apple.com/hotspot-detect.html"); got != "http://www.guestwifi.test:8443/login" {
+		t.Fatalf("metaRefreshURL = %q, want the login page", got)
+	}
+}

@@ -1,8 +1,11 @@
 package main
 
 import (
+	"crypto/x509"
 	"encoding/binary"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -100,5 +103,57 @@ func TestDNSRejectsGarbage(t *testing.T) {
 		if _, _, err := p.answer(q); err == nil {
 			t.Errorf("answered a malformed query %x", q)
 		}
+	}
+}
+
+// TestHostileDNSSendsCDNAndRegToTheImpostor: in dns mode, the remembered
+// hosts resolve to net, and /reset puts the truth back.
+func TestHostileDNSSendsCDNAndRegToTheImpostor(t *testing.T) {
+	p := testPortal()
+	p.hostile.Store("dns")
+	for _, h := range []string{"cdn.guestwifi.test", "reg.guestwifi.test"} {
+		if got := p.resolve(h); !got.Equal(p.inet) {
+			t.Errorf("%s = %v in dns mode, want the impostor %v", h, got, p.inet)
+		}
+	}
+	if got := p.resolve("www.guestwifi.test"); !got.Equal(p.self) {
+		t.Errorf("www moved too: %v", got)
+	}
+	rec := httptest.NewRecorder()
+	p.handleReset(rec, httptest.NewRequest(http.MethodPost, "/reset", nil))
+	if got := p.resolve("cdn.guestwifi.test"); !got.Equal(p.cdn) {
+		t.Errorf("reset left cdn at %v", got)
+	}
+}
+
+// TestHostilePageStillNamesTheLogin: the malformed interception page is
+// served as a 200, with the real login in it after the bait.
+func TestHostilePageStillNamesTheLogin(t *testing.T) {
+	p := testPortal()
+	p.hostile.Store("page")
+	rec := httptest.NewRecorder()
+	p.handleIntercept(rec, httptest.NewRequest(http.MethodGet, "/hotspot-detect.html", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), p.loginURL()) {
+		t.Fatalf("got %d %q", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "\xc5url=") {
+		t.Fatal("the bait bytes are missing")
+	}
+}
+
+func TestSelfSignedIsForTheNamesAndUntrusted(t *testing.T) {
+	cert, err := selfSigned("cdn.guestwifi.test", "reg.guestwifi.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := leaf.VerifyHostname("cdn.guestwifi.test"); err != nil {
+		t.Fatalf("not for cdn: %v", err)
+	}
+	if _, err := leaf.Verify(x509.VerifyOptions{DNSName: "cdn.guestwifi.test"}); err == nil {
+		t.Fatal("the system trusts the impostor's certificate")
 	}
 }

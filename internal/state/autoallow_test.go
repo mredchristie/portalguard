@@ -234,3 +234,32 @@ func TestAutoAllowNeedsASiteOfItsOwn(t *testing.T) {
 		t.Fatal("auto-allow trusted a shared hosting domain")
 	}
 }
+
+// TestAutoAllowWantsNothingNewPastTheCap: a yes from Wants sends the query to
+// the network, so past the cap only hosts already open may be asked about.
+// Otherwise their AAAA and HTTPS lookups leak though their A answer never
+// opens. Found by the hostile hotspot.
+func TestAutoAllowWantsNothingNewPastTheCap(t *testing.T) {
+	_, _, a := autoSession(t, GapOpen)
+	for i := 0; i < maxAutoAllow; i++ {
+		if err := a.Open(fmt.Sprintf("h%d.btwifi.com", i), []net.IP{net.IPv4(203, 0, 113, byte(i))}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var said []string
+	a.s.logf = func(f string, args ...any) { said = append(said, fmt.Sprintf(f, args...)) }
+	if a.Wants("h99.btwifi.com") {
+		t.Error("a host past the cap was wanted, so its lookups would reach the network")
+	}
+	_ = a.Wants("h98.btwifi.com")
+	if n := len(said); n != 1 || !strings.Contains(said[0], "allowed by hand") {
+		t.Errorf("past the cap, said %q; want the cap explained once", said)
+	}
+	if !a.Wants("H0.btwifi.com.") {
+		t.Error("a host already open must still be wanted, for its AAAA and HTTPS answers")
+	}
+	a.close()
+	if a.Wants("h0.btwifi.com") {
+		t.Error("wanted after the seal closed auto-allow")
+	}
+}

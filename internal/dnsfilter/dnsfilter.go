@@ -403,11 +403,8 @@ func (s *Server) handle(q []byte) []byte {
 func (s *Server) decide(q []byte, name string) ([]byte, string) {
 	if !s.Policy.Allowed(name) {
 		if s.Auto != nil && s.Auto.Wants(name) {
-			if r := s.autoAllow(q, name); r != nil {
-				if r[3]&0x0F == 2 {
-					return r, "servfail"
-				}
-				return r, "auto"
+			if r, verdict := s.autoAllow(q, name); r != nil {
+				return r, verdict
 			}
 		}
 		s.mu.Lock()
@@ -432,28 +429,37 @@ func (s *Server) decide(q []byte, name string) ([]byte, string) {
 // autoAllow forwards a query Auto wants, opens the addresses in the answer,
 // and returns the reply, or nil to have the query refused after all.
 //
-// A reply with no addresses in it (no such name, or the HTTPS record query
-// browsers send alongside A and AAAA) goes back as it is: it gives the client
-// nothing to connect to. A reply with any address goes back only once Open
-// has succeeded.
-func (s *Server) autoAllow(q []byte, name string) []byte {
+// A reply with no addresses in it (no such name, or an HTTPS record without
+// address hints) goes back as it is: it gives the client nothing to connect
+// to. A reply with any address, hints included, goes back only once Open has
+// succeeded.
+func (s *Server) autoAllow(q []byte, name string) ([]byte, string) {
 	r, err := s.forward(q)
 	if err != nil {
-		return servfail(q)
+		return servfail(q), "servfail"
 	}
-	if addrs := answerAddrs(r); len(addrs) > 0 {
+	addrs := answerAddrs(r)
+	if len(addrs) > 0 {
 		if err := s.Auto.Open(name, addrs); err != nil {
 			if s.Logf != nil {
 				s.Logf("dns filter: could not open %s automatically: %v", name, err)
 			}
-			return nil
+			return nil, ""
 		}
 	}
 	s.mu.Lock()
-	s.auto[name]++
 	s.forwarded[name]++
+	if len(addrs) > 0 {
+		s.auto[name]++
+	}
 	s.mu.Unlock()
-	return r
+	// "auto" only for an answer that opened something: an AAAA or HTTPS
+	// reply with no address in it was forwarded, not opened, and counting it
+	// as opened made the trace overstate what auto-allow did.
+	if len(addrs) > 0 {
+		return r, "auto"
+	}
+	return r, "forwarded"
 }
 
 // forward sends q upstream from the fixed port under a fresh ID, and returns
@@ -588,6 +594,41 @@ func answerAddrs(r []byte) []net.IP {
 		switch {
 		case typ == 1 && n == 4, typ == 28 && n == 16:
 			out = append(out, net.IP(append([]byte(nil), r[i:i+n]...)))
+		case typ == 64 || typ == 65:
+			out = append(out, svcbHints(r[i:i+n])...)
+		}
+		i += n
+	}
+	return out
+}
+
+// svcbHints returns the ipv4hint and ipv6hint addresses in one SVCB or HTTPS
+// record's data (RFC 9460). Browsers ask for HTTPS records alongside A and
+// AAAA and may connect to a hint before either answers, so a hint auto-allow
+// did not open is a connection that fails.
+func svcbHints(d []byte) []net.IP {
+	// SvcPriority, then TargetName: uncompressed, per the RFC.
+	if len(d) < 3 {
+		return nil
+	}
+	i := 2
+	for i < len(d) && d[i] != 0 {
+		i += int(d[i]) + 1
+	}
+	i++
+	var out []net.IP
+	for i+4 <= len(d) {
+		key := binary.BigEndian.Uint16(d[i : i+2])
+		n := int(binary.BigEndian.Uint16(d[i+2 : i+4]))
+		i += 4
+		if i+n > len(d) {
+			return out
+		}
+		size := map[uint16]int{4: 4, 6: 16}[key] // ipv4hint, ipv6hint
+		if size > 0 && n%size == 0 {
+			for j := i; j < i+n; j += size {
+				out = append(out, net.IP(append([]byte(nil), d[j:j+size]...)))
+			}
 		}
 		i += n
 	}

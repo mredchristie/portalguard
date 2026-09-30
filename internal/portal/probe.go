@@ -394,7 +394,10 @@ var jsRedirectRe = regexp.MustCompile(`(?is)(?:window\.)?location(?:\.href)?\s*=
 
 // metaRefreshURL extracts a login URL from a portal's interstitial body.
 func metaRefreshURL(body []byte, base string) string {
-	if m := metaRefreshRe.FindSubmatch(body); m != nil {
+	// Every refresh on the page, not just the first: one with an empty url=
+	// resolves to the page itself, and a page that leads with one would
+	// otherwise hide the real login behind it.
+	for _, m := range metaRefreshRe.FindAllSubmatch(body, 8) {
 		content := string(m[1])
 		// Matched on the original bytes. Lowercasing a copy to search it
 		// shifts every offset after an invalid byte (it becomes a 3-byte
@@ -402,7 +405,9 @@ func metaRefreshURL(body []byte, base string) string {
 		// panicked: a portal page could crash detection. Found by
 		// FuzzMetaRefresh.
 		if loc := refreshURLRe.FindStringIndex(content); loc != nil {
-			return resolveRef(base, strings.Trim(strings.TrimSpace(content[loc[1]:]), `"'`))
+			if ref := strings.Trim(strings.TrimSpace(content[loc[1]:]), `"'`); ref != "" {
+				return resolveRef(base, ref)
+			}
 		}
 	}
 	if m := jsRedirectRe.FindSubmatch(body); m != nil {

@@ -454,6 +454,246 @@ body {
   color: var(--text);
 }
 
+/* ==== choosing a network (idle) ========================================== */
+
+/* Idle is about the list: the ring gets smaller and the steps wait until a
+   run starts. */
+.app.is-idle .ring {
+  width: 84px;
+  height: 84px;
+  margin-bottom: 0;
+}
+.app.is-idle .ring-core {
+  inset: 11px;
+}
+.app.is-idle .glyph {
+  width: 28px;
+  height: 28px;
+}
+.app.is-idle .hero {
+  gap: 6px;
+  padding-top: 0;
+}
+.app.is-idle .headline {
+  font-size: 21px;
+}
+.app.is-idle .steps {
+  display: none;
+}
+
+.label.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.refresh {
+  background: none;
+  border: 0;
+  color: var(--muted);
+  font-size: 15px;
+  cursor: pointer;
+  padding: 0 2px;
+  transition: color 0.2s, transform 0.4s var(--ease);
+}
+.refresh:hover {
+  color: var(--text);
+  transform: rotate(90deg);
+}
+
+.nets {
+  list-style: none;
+  display: grid;
+  gap: 5px;
+}
+.net {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  align-items: center;
+  column-gap: 10px;
+  padding: 10px 12px;
+  border-radius: 11px;
+  border: 1px solid transparent;
+  background: rgba(255, 255, 255, 0.025);
+  cursor: pointer;
+  outline: none;
+  transition: background 0.2s, border-color 0.25s, box-shadow 0.3s;
+  animation: rise 0.4s var(--ease) both;
+}
+.net:hover,
+.net:focus-visible {
+  background: rgba(255, 255, 255, 0.05);
+}
+.net.sel {
+  border-color: rgba(0, 255, 136, 0.5);
+  background: rgba(0, 255, 136, 0.06);
+  box-shadow: 0 0 0 3px rgba(0, 255, 136, 0.08), 0 8px 24px -14px rgba(0, 255, 136, 0.6);
+}
+.ssid {
+  font-size: 13.5px;
+  font-weight: 550;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bars {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 12px;
+}
+.bars i {
+  width: 3px;
+  border-radius: 1px;
+  background: var(--faint);
+}
+.bars i:nth-child(1) { height: 4px; }
+.bars i:nth-child(2) { height: 6.5px; }
+.bars i:nth-child(3) { height: 9px; }
+.bars i:nth-child(4) { height: 12px; }
+.bars.b1 i:nth-child(-n + 1),
+.bars.b2 i:nth-child(-n + 2),
+.bars.b3 i:nth-child(-n + 3),
+.bars.b4 i:nth-child(-n + 4) {
+  background: var(--text);
+}
+.net.sel .bars i:not([style]) {
+  opacity: 1;
+}
+.tag {
+  font-style: normal;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 3px 6px;
+  border-radius: 5px;
+  color: var(--muted);
+  border: 1px solid var(--faint);
+}
+.tag--open {
+  color: var(--green);
+  border-color: rgba(0, 255, 136, 0.35);
+}
+.lockic {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.pw {
+  grid-column: 1 / -1;
+  margin-top: 9px;
+  padding: 9px 11px;
+  border-radius: 8px;
+  border: 1px solid var(--faint);
+  background: rgba(5, 8, 22, 0.7);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 13px;
+  outline: none;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.pw:focus {
+  border-color: rgba(0, 255, 136, 0.5);
+}
+
+.permit {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 12px;
+  padding: 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(0, 153, 255, 0.28);
+  background: rgba(0, 153, 255, 0.07);
+}
+.permit > svg {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: var(--blue);
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.permit b {
+  display: block;
+  font-size: 13.5px;
+  margin-bottom: 3px;
+}
+.permit span {
+  display: block;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.45;
+  margin-bottom: 10px;
+}
+.mini {
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 650;
+  padding: 7px 12px;
+  border-radius: 8px;
+  border: 0;
+  cursor: pointer;
+  color: #03140b;
+  background: var(--green);
+}
+
+.quiet {
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+.quiet.small {
+  font-size: 11.5px;
+}
+
+.doc {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+.doc i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 6px rgba(0, 255, 136, 0.6);
+}
+.doc.lvl-warn i {
+  background: var(--amber);
+  box-shadow: none;
+}
+.doc.lvl-fail i {
+  background: var(--red);
+  box-shadow: none;
+}
+.doc.lvl-fail {
+  color: var(--text);
+}
+
+.textlink {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--text);
+  text-decoration: underline;
+  text-decoration-color: var(--faint);
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+.textlink:hover {
+  text-decoration-color: var(--green);
+}
+
 /* ==== steps ============================================================== */
 
 .steps {

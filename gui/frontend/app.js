@@ -25,6 +25,7 @@
     shield: '<path d="M12 2.5 4.5 5.4v6.1c0 4.8 3.2 8.4 7.5 10 4.3-1.6 7.5-5.2 7.5-10V5.4z"/>',
     lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
     wifi: '<path d="M2.5 9a14 14 0 0 1 19 0M5.5 12.5a9.5 9.5 0 0 1 13 0M8.5 16a5 5 0 0 1 7 0"/><circle cx="12" cy="19.5" r="0.6"/>',
+    pin: '<path d="M12 21s-6.5-5.6-6.5-11a6.5 6.5 0 0 1 13 0c0 5.4-6.5 11-6.5 11z"/><circle cx="12" cy="10" r="2.3"/>',
     key: '<circle cx="8" cy="15" r="4"/><path d="m11 12 8.5-8.5M16 7l2.5 2.5M14 9l2 2"/>',
     seal: '<path d="M12 2.5 4.5 5.4v6.1c0 4.8 3.2 8.4 7.5 10 4.3-1.6 7.5-5.2 7.5-10V5.4z"/><path d="m8.6 12.2 2.4 2.4 4.6-4.9"/>',
     tunnel: '<path d="M4 20V11a8 8 0 0 1 16 0v9"/><path d="M8.5 20v-8a3.5 3.5 0 0 1 7 0v8"/>',
@@ -52,6 +53,10 @@
       trusted: '',
       wait: '',
       doctor: st ? st.doctor : null,
+      scan: st ? st.scan : null,
+      selected: st ? st.selected : '',
+      password: '',
+      joining: '',
     };
   }
   reset();
@@ -63,6 +68,9 @@
         reset();
         st.phase = 'armed';
         st.step = 0;
+        break;
+      case 'joining':
+        st.joining = ev.ssid;
         break;
       case 'waiting':
         st.wait = ev.for;
@@ -162,8 +170,8 @@
 
   const COPY = {
     starting: ['Starting', 'lock', 'Starting', 'Enter your Mac password to let PortalGuard control the firewall.'],
-    idle: ['Ready', 'shield', 'Ready when you are', 'Arm before you join public Wi-Fi. Nothing on this Mac can reach the network until you have signed in and your VPN is up.'],
-    armed: ['Armed', 'wifi', 'Join the Wi-Fi now', 'Everything on this Mac is blocked, so nothing leaks while it connects.'],
+    idle: ['Ready', 'wifi', 'Choose a network', 'PortalGuard locks this Mac first, then joins it for you, so nothing leaks while it connects.'],
+    armed: ['Armed', 'lock', 'Join the Wi-Fi now', 'Everything on this Mac is blocked, so nothing leaks while it connects.'],
     locked: ['Locked', 'lock', 'Checking this network', 'Only PortalGuard’s own checks can get out.'],
     login: ['Sign in', 'key', 'Sign in on the page that opened', 'Only the login page can get through. Every other app stays blocked.'],
     signedin: ['Signed in', 'seal', 'You’re signed in', 'Closing the gap behind you.'],
@@ -189,7 +197,9 @@
     }
     let h = headline;
     let s = sub;
-    if (st.phase === 'locked' && st.host) {
+    if (st.phase === 'armed' && st.joining) {
+      h = `Joining ${st.joining}`;
+    } else if (st.phase === 'locked' && st.host) {
       h = 'Found a login page';
       s = st.host;
     } else if (st.phase === 'vpn') {
@@ -219,6 +229,7 @@
     });
     el.steps.style.setProperty('--progress', String(Math.max(0, Math.min(st.step, 4)) / 4));
     el.steps.style.visibility = st.phase === 'trusted' ? 'hidden' : '';
+    app.classList.toggle('is-idle', st.phase === 'idle');
 
     drawContext();
     drawActions();
@@ -247,26 +258,86 @@
         <div class="stat"><b data-count="${Math.round(s.gap_seconds || 0)}" data-suffix="s">0s</b><span>the gap was open</span></div>
       </div>`);
     }
-    if (st.phase === 'idle' && st.doctor) {
-      // doctor, as this user: what would stop a run, before one starts.
-      const rows = st.doctor.filter((f) => f.title !== 'the firewall was not checked').slice(0, 6);
-      parts.push(`<div class="label">This Mac</div><ul class="checks">${rows
-        .map((f) => `<li class="lvl-${esc(f.level)}"><i></i><span>${esc(cap(f.title))}</span></li>`)
-        .join('')}</ul>`);
-    }
+    if (st.phase === 'idle') parts.push(networksHTML());
     if (st.note && st.phase !== 'done') parts.push(`<p class="note">${esc(st.note)}</p>`);
     const html = parts.join('');
-    if (html !== el.context.dataset.html) {
+    const typing = document.activeElement && document.activeElement.matches('[data-pw]');
+    if (html !== el.context.dataset.html && !typing) {
       el.context.dataset.html = html;
       el.context.innerHTML = html;
       countUp();
     }
   }
 
+  // networksHTML is the idle screen's list, or why there is no list.
+  function networksHTML() {
+    const sc = st.scan;
+    let body = '';
+    if (!sc) {
+      body = `<p class="quiet">Looking for networks…</p>`;
+    } else if (sc.error && !(sc.networks || []).length) {
+      body = `<p class="quiet">${esc(cap(sc.error))}</p>`;
+    } else if (!sc.power) {
+      body = `<p class="quiet">Wi-Fi is off. Turn it on in the menu bar, and networks will appear here.</p>`;
+    } else if (sc.location === 'ask' || (sc.location !== 'allowed' && !(sc.networks || []).length)) {
+      const denied = sc.location === 'denied' || sc.location === 'restricted';
+      body = `<div class="permit">
+        <svg viewBox="0 0 24 24">${GLYPHS.pin}</svg>
+        <div><b>See the networks around you</b>
+        <span>macOS shows Wi-Fi names only to apps with Location. PortalGuard uses it for that alone, and never records where you are.</span>
+        ${denied
+          ? `<button class="mini" data-open-location>Open Location settings</button>`
+          : `<button class="mini" data-ask-location>Allow Location</button>`}</div></div>`;
+    } else {
+      const rows = (sc.networks || []).map((n) => {
+        const sel = n.ssid === st.selected;
+        const bars = n.rssi >= -55 ? 4 : n.rssi >= -65 ? 3 : n.rssi >= -75 ? 2 : 1;
+        const tags = (n.current ? '<em class="tag">Connected</em>' : '') +
+          (n.open ? '<em class="tag tag--open">Open</em>' : '<svg class="lockic" viewBox="0 0 24 24">' + GLYPHS.lock + '</svg>');
+        // The network the Mac is already on is not joined again, so it needs
+        // no password; any other secured one does.
+        const pw = sel && !n.open && !n.current
+          ? `<input class="pw" type="password" placeholder="Password" data-pw autocomplete="off" />`
+          : '';
+        return `<li class="net${sel ? ' sel' : ''}" data-ssid="${esc(n.ssid)}" tabindex="0">
+          <span class="bars b${bars}"><i></i><i></i><i></i><i></i></span>
+          <span class="ssid">${esc(n.ssid)}</span>${tags}${pw}</li>`;
+      }).join('');
+      body = `<ul class="nets">${rows || '<li class="quiet">No networks in range.</li>'}</ul>` +
+        (sc.hidden ? `<p class="quiet small">${sc.hidden} more without a name.</p>` : '');
+    }
+    return `<div class="label row"><span>Networks nearby</span><button class="refresh" data-refresh title="Scan again">↻</button></div>${body}${doctorLine()}`;
+  }
+
+  // doctorLine is doctor's verdict in one line: ready, or the first problem.
+  function doctorLine() {
+    if (!st.doctor) return '';
+    const bad = st.doctor.find((f) => f.level === 'fail') || st.doctor.find((f) => f.level === 'warn');
+    const lvl = bad ? bad.level : 'ok';
+    const text = bad ? cap(bad.title) : 'This Mac is ready';
+    const detail = bad && bad.detail ? ` title="${esc(bad.detail)}"` : '';
+    return `<p class="doc lvl-${lvl}"${detail}><i></i>${esc(text)}</p>`;
+  }
+
+  function selectedNetwork() {
+    return ((st.scan && st.scan.networks) || []).find((n) => n.ssid === st.selected);
+  }
+
   function drawActions() {
     const running = !['idle', 'done', 'trusted', 'error'].includes(st.phase);
-    el.primary.disabled = st.phase === 'starting';
-    el.primary.textContent = running ? 'Cancel' : st.phase === 'idle' ? 'Arm' : 'Arm again';
+    el.primary.disabled = st.phase === 'starting' || (st.phase === 'idle' && !st.selected);
+    if (st.phase === 'idle') {
+      const n = selectedNetwork();
+      el.primary.textContent = !st.selected
+        ? 'Choose a network'
+        : n && n.current
+          ? `Arm on ${st.selected}`
+          : `Arm and join ${st.selected}`;
+      el.primary.className = 'btn btn--primary';
+      el.hint.innerHTML = '<button class="textlink" data-arm-any>Arm without choosing</button> · you will be asked for your Mac password';
+      return;
+    }
+    el.primary.textContent = running ? 'Cancel' : 'Back to networks';
     el.primary.className = running ? 'btn btn--quiet' : 'btn btn--primary';
     el.hint.textContent = running
       ? 'Cancel releases everything and gives the network back.'
@@ -304,9 +375,46 @@
     draw();
   }
 
+  function arm(ssid) {
+    const n = selectedNetwork();
+    if (ssid && n && !n.open && !n.current && !st.password) {
+      st.note = `${ssid} is secured: type its password first.`;
+      draw();
+      const pw = el.context.querySelector('[data-pw]');
+      if (pw) pw.focus();
+      return;
+    }
+    // Already on it: nothing to join, just lock and check it.
+    const join = n && n.current ? '' : ssid;
+    const doctor = st.doctor;
+    const scan = st.scan;
+    const password = st.password;
+    reset();
+    Object.assign(st, { doctor, scan, selected: ssid, phase: 'starting' });
+    draw();
+    engine.Arm(join, join ? password : '').catch((e) => {
+      const text = String(e);
+      if (text.includes('password prompt')) {
+        st.phase = 'idle';
+        st.note = 'Not armed: the password prompt was closed.';
+        draw();
+      } else {
+        onEvent({ type: 'error', text });
+      }
+    });
+  }
+
   el.primary.addEventListener('click', () => {
     const running = !['idle', 'done', 'trusted', 'error'].includes(st.phase);
     if (st.phase === 'starting') return;
+    if (engine && st.phase === 'idle') {
+      if (st.selected) arm(st.selected);
+      return;
+    }
+    if (engine && !running) {
+      backToNetworks();
+      return;
+    }
     if (engine) {
       if (running) engine.Cancel();
       else {
@@ -330,7 +438,41 @@
       demo();
     }
   });
+  el.hint.addEventListener('click', (e) => {
+    if (e.target.closest('[data-arm-any]')) {
+      if (engine) arm('');
+      else demo();
+    }
+  });
+  el.context.addEventListener('input', (e) => {
+    if (e.target.matches('[data-pw]')) st.password = e.target.value;
+  });
   el.context.addEventListener('click', (e) => {
+    const row = e.target.closest('[data-ssid]');
+    if (row && !e.target.matches('[data-pw]')) {
+      const ssid = row.dataset.ssid;
+      if (st.selected !== ssid) {
+        st.selected = ssid;
+        st.password = '';
+        st.note = '';
+        draw();
+        const pw = el.context.querySelector('[data-pw]');
+        if (pw) pw.focus();
+      }
+    }
+    if (e.target.closest('[data-refresh]')) scan();
+    if (e.target.closest('[data-ask-location]') && engine) {
+      engine.AskLocation();
+      // macOS answers in its own time; look again as it does.
+      let n = 0;
+      const t = setInterval(() => {
+        scan();
+        if (++n > 15 || (st.scan && st.scan.location !== 'ask')) clearInterval(t);
+      }, 1000);
+    }
+    if (e.target.closest('[data-open-location]') && engine) {
+      engine.OpenURL('x-apple.systempreferences:com.apple.preference.security?Privacy_LocationServices');
+    }
     const allow = e.target.closest('[data-allow]');
     if (allow && engine) engine.Open(allow.dataset.allow);
     if (e.target.closest('[data-open-url]') && engine) engine.OpenURL(st.url);
@@ -348,6 +490,28 @@
         .catch(() => {});
     refresh();
     window.addEventListener('focus', refresh);
+    scan();
+    // Networks come and go: look again every so often while choosing.
+    setInterval(() => {
+      if (st.phase === 'idle') scan();
+    }, 8000);
+  }
+
+  function backToNetworks() {
+    const { doctor, scan: sc, selected } = st;
+    reset();
+    Object.assign(st, { doctor, scan: sc, selected });
+    draw();
+    scan();
+  }
+
+  function scan() {
+    if (!engine) return;
+    engine.Networks().then((sc) => {
+      st.scan = sc;
+      if (st.selected && !(sc.networks || []).some((n) => n.ssid === st.selected)) st.selected = '';
+      if (st.phase === 'idle') draw();
+    });
   }
 
   // A real armed login, from the feed of a hotspot run, with a payment host
@@ -355,6 +519,7 @@
   const REPLAY = [
     [0, { type: 'start', command: 'arm' }],
     [600, { type: 'transition', from: 'IDLE', event: 'ARM', to: 'ARMED', note: 'pf' }],
+    [100, { type: 'joining', ssid: 'BTWi-fi' }],
     [300, { type: 'waiting', for: 'network' }],
     [3200, { type: 'transition', from: 'ARMED', event: 'PORTAL_FOUND', to: 'LOCKED_DOWN', note: 'www.btwifi.com' }],
     [1600, { type: 'transition', from: 'LOCKED_DOWN', event: 'OPEN_GAP', to: 'GAP_OPEN', note: 'www.btwifi.com' }],
@@ -398,8 +563,27 @@
     { level: 'info', title: 'NordVPN is installed' },
   ];
 
+  const DEMO_SCAN = {
+    location: 'allowed',
+    power: true,
+    current: 'Christie Home',
+    hidden: 2,
+    networks: [
+      { ssid: 'Christie Home', rssi: -41, open: false, current: true },
+      { ssid: 'BTWi-fi', rssi: -52, open: true },
+      { ssid: 'EE WiFi', rssi: -58, open: true },
+      { ssid: 'Harbour Hotel Guest', rssi: -66, open: true },
+      { ssid: 'SKY9F3A2', rssi: -71, open: false },
+      { ssid: 'BT-7XJQ2K', rssi: -79, open: false },
+    ],
+  };
+
   const q = new URLSearchParams(location.search);
-  if (!engine) st.doctor = DEMO_DOCTOR;
+  if (!engine) {
+    st.doctor = DEMO_DOCTOR;
+    st.scan = q.has('ask') ? { location: 'ask', power: true, networks: [] } : DEMO_SCAN;
+    if (q.has('pick')) st.selected = q.get('pick');
+  }
   if (!engine && q.has('demo')) {
     demo(q.has('at') ? Number(q.get('at')) : undefined);
   } else {

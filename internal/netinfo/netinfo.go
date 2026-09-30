@@ -110,3 +110,54 @@ func parseARP(out string) (string, error) {
 	}
 	return strings.Join(parts, ":"), nil
 }
+
+// parseHardwarePorts finds the Wi-Fi device in `networksetup
+// -listallhardwareports`:
+//
+//	Hardware Port: Wi-Fi
+//	Device: en0
+func parseHardwarePorts(out string) (string, bool) {
+	port := ""
+	for _, line := range strings.Split(out, "\n") {
+		k, v, ok := strings.Cut(strings.TrimSpace(line), ":")
+		if !ok {
+			continue
+		}
+		v = strings.TrimSpace(v)
+		switch k {
+		case "Hardware Port":
+			port = v
+		case "Device":
+			if port == "Wi-Fi" || port == "AirPort" {
+				return v, true
+			}
+		}
+	}
+	return "", false
+}
+
+// joinFailed reads networksetup's reply to -setairportnetwork: it exits 0
+// either way, and says what went wrong in words.
+func joinFailed(out string) error {
+	out = strings.TrimSpace(out)
+	if out == "" {
+		return nil
+	}
+	low := strings.ToLower(out)
+	failed := false
+	for _, bad := range []string{"could not", "error", "failed", "unable"} {
+		if strings.Contains(low, bad) {
+			failed = true
+		}
+	}
+	if !failed {
+		return nil
+	}
+	// networksetup says it twice, once on each stream; and -3900 is how it
+	// says a secured network was not given the password it needs.
+	first, _, _ := strings.Cut(out, "\n")
+	if strings.Contains(out, "-3900") {
+		return fmt.Errorf("macOS could not join it; a secured network needs its password")
+	}
+	return fmt.Errorf("%s", strings.TrimSpace(first))
+}

@@ -87,3 +87,42 @@ func GatewayMAC(ctx context.Context, gw net.IP) (string, error) {
 	}
 	return parseARP(string(out))
 }
+
+// WiFiDevice returns the Wi-Fi interface, usually en0.
+func WiFiDevice(ctx context.Context) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "/usr/sbin/networksetup", "-listallhardwareports").Output()
+	if err != nil {
+		return "", fmt.Errorf("list network ports: %w", err)
+	}
+	dev, ok := parseHardwarePorts(string(out))
+	if !ok {
+		return "", fmt.Errorf("this Mac has no Wi-Fi interface")
+	}
+	return dev, nil
+}
+
+// JoinWiFi asks macOS to join a Wi-Fi network, with its password if it has
+// one. It returns once macOS has answered; the network's address and DNS
+// arrive shortly after.
+func JoinWiFi(ctx context.Context, ssid, password string) error {
+	dev, err := WiFiDevice(ctx)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	args := []string{"-setairportnetwork", dev, ssid}
+	if password != "" {
+		args = append(args, password)
+	}
+	out, err := exec.CommandContext(ctx, "/usr/sbin/networksetup", args...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("join %q: %w: %s", ssid, err, strings.TrimSpace(string(out)))
+	}
+	if err := joinFailed(string(out)); err != nil {
+		return fmt.Errorf("join %q: %w", ssid, err)
+	}
+	return nil
+}

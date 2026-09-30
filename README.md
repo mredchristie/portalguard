@@ -51,6 +51,16 @@ detects the portal through it, and carries on as `run` does. On an open
 network it goes straight to VPN-only, and on one you have marked with
 `portalguard trust` it stands down.
 
+## The app
+
+`make app` builds `gui/build/bin/PortalGuard.app`: a window with one Arm
+button that runs the same engine and shows its progress as it happens. It
+asks for your Mac password each time you arm, so nothing is installed on the
+system, and closing it always gives the network back. It reads the engine's
+progress feed ([`docs/feed.md`](docs/feed.md)) and never touches the
+firewall itself. Each run's trace is kept in `~/Library/Logs/PortalGuard/`.
+It is signed for this Mac only, not yet for handing to anyone else.
+
 ## Commands
 
 | Command | Root | What it does |
@@ -138,6 +148,7 @@ make preflight     # every hotspot run back to back, before a field test
 | [`pf-design.md`](docs/pf-design.md) | Every firewall rule, the DNS filter, the handover, living with VPNs |
 | [`gap-scope.md`](docs/gap-scope.md) | How wide the gap should be, and why that is the hard part |
 | [`field-notes.md`](docs/field-notes.md) | The BT Wi-Fi trips, and reproducing the leak at home |
+| [`feed.md`](docs/feed.md) | `-json`: the progress feed a GUI reads |
 | [`demo.md`](docs/demo.md) | Capturing the leak yourself, and redacting it |
 | [`testenv/README.md`](testenv/README.md) | The test portals and how each test works |
 

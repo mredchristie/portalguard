@@ -50,10 +50,19 @@ func (a *App) startup(ctx context.Context) {
 // and releases the firewall: a closed app never leaves the network locked.
 func (a *App) shutdown(context.Context) { a.finish() }
 
-// Arm starts `portalguard arm -json` as root. It returns once the engine has
-// been started, or with the reason it was not (the password prompt
-// cancelled, say); from then on everything arrives on the "feed" event.
-func (a *App) Arm() error {
+// Networks scans for Wi-Fi networks in range, for the list.
+func (a *App) Networks() Scan { return scanWiFi() }
+
+// AskLocation shows macOS's Location prompt, which is what lets the list
+// show network names. macOS asks once and remembers the answer.
+func (a *App) AskLocation() { requestLocation() }
+
+// Arm starts `portalguard arm -json` as root, joining ssid once locked down
+// (or, with no ssid, detecting whatever network the Mac is on or joins).
+// password is for the rare hotspot that has one. It returns once the engine
+// has started, or with the reason it did not (the password prompt closed,
+// say); from then on everything arrives on the "feed" event.
+func (a *App) Arm(ssid, password string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.running {
@@ -85,13 +94,30 @@ func (a *App) Arm() error {
 		return err
 	}
 
+	// The network to join, and its password in a file only this user and
+	// root can read, which the engine deletes as soon as it has read it: a
+	// password on a command line would be visible to every process.
+	join := ""
+	if ssid != "" {
+		join = " -join " + shq(ssid)
+		if password != "" {
+			pw := filepath.Join(dir, "pw")
+			if err := os.WriteFile(pw, []byte(password), 0o600); err != nil {
+				w.Close()
+				os.RemoveAll(dir)
+				return err
+			}
+			join += " -join-password-file " + shq(pw)
+		}
+	}
+
 	// SUDO_UID and SUDO_GID make the engine hand its trace to this user, as
 	// it does under sudo, so the log can be kept and read afterwards.
 	// Backgrounded with every stream redirected, so it outlives the shell
 	// the password prompt runs it in. Not nohup: with no terminal there,
 	// nohup refuses to start at all ("can't detach from console").
-	cmd := fmt.Sprintf("SUDO_UID=%d SUDO_GID=%d %s arm -json -trace %s < %s > %s 2> %s &",
-		os.Getuid(), os.Getgid(), shq(bin), shq(filepath.Join(dir, "trace")), shq(in), shq(feed), shq(filepath.Join(dir, "err")))
+	cmd := fmt.Sprintf("SUDO_UID=%d SUDO_GID=%d %s arm -json%s -trace %s < %s > %s 2> %s &",
+		os.Getuid(), os.Getgid(), shq(bin), join, shq(filepath.Join(dir, "trace")), shq(in), shq(feed), shq(filepath.Join(dir, "err")))
 	script := "do shell script " + appleString(cmd) + " with administrator privileges with prompt \"PortalGuard needs your password to control the firewall.\""
 	if out, err := exec.Command("/usr/bin/osascript", "-e", script).CombinedOutput(); err != nil {
 		w.Close()

@@ -21,3 +21,6 @@ func ActiveTunnel(context.Context) (*Tunnel, error) { return nil, nil }
 
 // GatewayMAC is not implemented off macOS.
 func GatewayMAC(context.Context, net.IP) (string, error) { return "", ErrUnsupported }
+
+// JoinWiFi is not implemented off macOS.
+func JoinWiFi(context.Context, string, string) error { return ErrUnsupported }

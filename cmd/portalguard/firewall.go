@@ -666,7 +666,10 @@ flags:
 	handoffWait := fs.Duration("handoff-wait", 3*time.Minute, "how long to wait for the VPN tunnel after sealing")
 	var next *bool
 	var joinWait *time.Duration
+	var join joinSpec
 	if armed {
+		fs.StringVar(&join.ssid, "join", "", "once locked down, join this Wi-Fi network, then detect it")
+		fs.StringVar(&join.passwordFile, "join-password-file", "", "a file holding the -join network's password; deleted once read")
 		next = fs.Bool("next", false, "wait for the next network rather than checking the one this Mac is on now")
 		joinWait = fs.Duration("join-wait", 30*time.Minute, "how long to wait, armed, for a network to join")
 	}
@@ -780,7 +783,7 @@ flags:
 		var res portal.Result
 		if armed {
 			var released bool
-			res, released, err = armedDetect(ctx, sess, g, note, *next, *joinWait)
+			res, released, err = armedDetect(ctx, sess, g, note, *next, *joinWait, join)
 			if err != nil || released {
 				return err
 			}

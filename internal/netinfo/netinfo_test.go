@@ -1,6 +1,9 @@
 package netinfo
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestIsTunnelName(t *testing.T) {
 	tunnels := []string{"utun0", "utun7", "ipsec0", "ppp0", "tun0", "wg0"}
@@ -35,5 +38,44 @@ func TestParseARP(t *testing.T) {
 		if got, err := parseARP(bad); err == nil {
 			t.Errorf("parseARP(%q) = %q, want an error", bad, got)
 		}
+	}
+}
+
+func TestParseHardwarePorts(t *testing.T) {
+	out := `Hardware Port: Ethernet Adapter (en4)
+Device: en4
+Ethernet Address: a2:a3:99:45:d4:3f
+
+Hardware Port: Wi-Fi
+Device: en0
+Ethernet Address: 80:a9:97:44:5e:4e
+`
+	if dev, ok := parseHardwarePorts(out); !ok || dev != "en0" {
+		t.Errorf("parseHardwarePorts = %q, %v", dev, ok)
+	}
+	if _, ok := parseHardwarePorts("Hardware Port: Ethernet\nDevice: en4\n"); ok {
+		t.Error("found Wi-Fi on a Mac without it")
+	}
+}
+
+func TestJoinFailed(t *testing.T) {
+	if joinFailed("") != nil {
+		t.Error("an empty reply is success")
+	}
+	for _, bad := range []string{
+		"Could not find network BTWi-fi.",
+		"Failed to join network BTWi-fi.\nError: -3900  The operation couldn't be completed.",
+	} {
+		if joinFailed(bad) == nil {
+			t.Errorf("%q read as success", bad)
+		}
+	}
+}
+
+func TestJoinFailedSaysWhatToDo(t *testing.T) {
+	out := "Failed to join network HomeWiFi.\nError: -3900  The operation couldn't be completed. tmpErr\nFailed to join network HomeWiFi.\nError: -3900  The operation couldn't be completed. tmpErr"
+	err := joinFailed(out)
+	if err == nil || !strings.Contains(err.Error(), "needs its password") || strings.Count(err.Error(), "HomeWiFi") > 1 {
+		t.Errorf("joinFailed = %v", err)
 	}
 }

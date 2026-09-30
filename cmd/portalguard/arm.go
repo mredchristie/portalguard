@@ -57,25 +57,78 @@ func currentNetwork(ctx context.Context) network {
 	return n
 }
 
+// joinSpec is the network to join once armed, if any: the app's list, or
+// -join. The password, when there is one, comes in a file the engine deletes
+// as soon as it has read it, so it is never on a command line.
+type joinSpec struct {
+	ssid, passwordFile string
+}
+
+// alreadyOnIt is how long, after asking macOS to join, a network that has
+// not changed is taken to be the one that was asked for: joining the network
+// the Mac is already on changes nothing, and there is no name to compare
+// (macOS hides it from command-line tools).
+var alreadyOnIt = 10 * time.Second
+
 // armedDetect arms, waits for a network, and detects through the lockdown.
 // released is true when a trusted network was found and the lockdown lifted.
-func armedDetect(ctx context.Context, sess *state.Session, g *guide, note func(string, ...any), next bool, wait time.Duration) (res portal.Result, released bool, err error) {
+func armedDetect(ctx context.Context, sess *state.Session, g *guide, note func(string, ...any), next bool, wait time.Duration, join joinSpec) (res portal.Result, released bool, err error) {
 	start := currentNetwork(ctx)
 	if err := sess.Arm(ctx); err != nil {
 		return res, false, err
 	}
-	if next || !start.ready() {
+	var joined time.Time
+	if join.ssid != "" {
+		// Locked first, joined second: whatever the Mac sends the moment the
+		// network appears has nowhere to go.
+		password := ""
+		if join.passwordFile != "" {
+			b, err := os.ReadFile(join.passwordFile)
+			os.Remove(join.passwordFile)
+			if err != nil {
+				return res, false, fmt.Errorf("read the Wi-Fi password: %w", err)
+			}
+			password = strings.TrimRight(string(b), "\r\n")
+		}
+		g.emit("joining", map[string]any{"ssid": join.ssid})
+		g.sayf("Joining %s...", join.ssid)
+		if err := netinfo.JoinWiFi(ctx, join.ssid, password); err != nil {
+			// Nothing was joined, so there is nothing to protect: give the
+			// network back rather than leave the Mac locked with nowhere to go.
+			if rerr := sess.Release(ctx); rerr != nil {
+				return res, false, fmt.Errorf("%v; and releasing failed: %v", err, rerr)
+			}
+			return res, true, fmt.Errorf("%v. PortalGuard has stood down, so this Mac is back on the network it was on", err)
+		}
+		joined = time.Now()
+	}
+	if next || !start.ready() || join.ssid != "" {
 		g.emit("waiting", map[string]any{"for": "network", "timeout_seconds": wait.Seconds()})
-		g.sayf("Join the Wi-Fi now. Waiting up to %s...", wait)
-		if g == nil {
-			fmt.Printf("Armed: everything is blocked. Join the network now; waiting up to %s.\n", wait)
+		if join.ssid == "" {
+			g.sayf("Join the Wi-Fi now. Waiting up to %s...", wait)
+			if g == nil {
+				fmt.Printf("Armed: everything is blocked. Join the network now; waiting up to %s.\n", wait)
+			}
+		}
+		// on reports whether the network to detect is here: a new one after
+		// -next or -join, any one otherwise; and, after -join, the same one
+		// once it has had time to change and has not (it was already on it).
+		on := func(cur network) bool {
+			if !cur.ready() {
+				return false
+			}
+			changed := cur.key() != start.key()
+			switch {
+			case join.ssid != "":
+				return changed || time.Since(joined) > alreadyOnIt
+			case next:
+				return changed
+			default:
+				return true
+			}
 		}
 		deadline := time.Now().Add(wait)
-		for {
-			cur := currentNetwork(ctx)
-			if cur.ready() && (!next || cur.key() != start.key()) {
-				break
-			}
+		for !on(currentNetwork(ctx)) {
 			if time.Now().After(deadline) {
 				return res, false, fmt.Errorf("no network joined within %s. The lockdown stays in place: sudo %s release to lift it", wait, invokedAs())
 			}

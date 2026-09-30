@@ -148,6 +148,10 @@ func (g *guide) summary(sess *state.Session) {
 
 // isTerminal reports whether f is a terminal rather than a file or a pipe.
 func isTerminal(f *os.File) bool {
+	// Run by the helper for someone at a terminal: talk as if to one.
+	if os.Getenv(ttyEnv) == "1" && (f == os.Stdout || f == os.Stdin) {
+		return true
+	}
 	st, err := f.Stat()
 	return err == nil && st.Mode()&os.ModeCharDevice != 0
 }

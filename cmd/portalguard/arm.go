@@ -89,6 +89,14 @@ func currentNetwork(ctx context.Context) network {
 // as soon as it has read it, so it is never on a command line.
 type joinSpec struct {
 	ssid, passwordFile string
+	// returnAfter: if the run is cancelled from the app, leave ssid again
+	// and let macOS rejoin its usual network. wasSaved records whether ssid
+	// was a saved network before PortalGuard joined it: only one PortalGuard
+	// added is forgotten on the way out.
+	returnAfter, wasSaved bool
+	// open: the network has no password, so it can safely be taken out of
+	// the saved list while macOS picks another (see netinfo.LeaveWiFi).
+	open bool
 }
 
 // alreadyOnIt is how long, after asking macOS to join, a network that has
@@ -99,7 +107,7 @@ var alreadyOnIt = 10 * time.Second
 
 // armedDetect arms, waits for a network, and detects through the lockdown.
 // released is true when a trusted network was found and the lockdown lifted.
-func armedDetect(ctx context.Context, sess *state.Session, g *guide, note func(string, ...any), next bool, wait time.Duration, join joinSpec) (res portal.Result, released bool, err error) {
+func armedDetect(ctx context.Context, sess *state.Session, g *guide, note func(string, ...any), next bool, wait time.Duration, join *joinSpec) (res portal.Result, released bool, err error) {
 	start := currentNetwork(ctx)
 	if err := sess.Arm(ctx); err != nil {
 		return res, false, err
@@ -117,7 +125,8 @@ func armedDetect(ctx context.Context, sess *state.Session, g *guide, note func(s
 			}
 			password = strings.TrimRight(string(b), "\r\n")
 		}
-		g.emit("joining", map[string]any{"ssid": join.ssid})
+		join.wasSaved, _ = netinfo.IsPreferred(ctx, join.ssid)
+		g.emit("joining", map[string]any{"ssid": join.ssid, "was_saved": join.wasSaved})
 		g.sayf("Joining %s...", join.ssid)
 		logf("joining %q (was on %s)", join.ssid, start.describe())
 		askedAt := time.Now()
@@ -287,4 +296,25 @@ func currentGatewayMAC(ctx context.Context) (string, error) {
 		return "", errors.New("not on a network: join the one you want to trust first")
 	}
 	return netinfo.GatewayMAC(ctx, r.Gateway)
+}
+
+// runLeave takes the Mac off a Wi-Fi network PortalGuard joined and back to
+// its usual one: the app's "give the network back" after a run that stopped
+// with an error. See netinfo.LeaveWiFi.
+func runLeave(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("leave", flag.ContinueOnError)
+	forget := fs.Bool("forget", false, "also remove it from macOS's saved networks (it was saved only because PortalGuard joined it)")
+	open := fs.Bool("open", false, "it is an open network: keep it out of macOS's choice while it rejoins another, then save it again")
+	if err := fs.Parse(args); err != nil || fs.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "usage: portalguard leave [-forget] <network>")
+		return exitUsageError
+	}
+	if err := requireRoot("leave"); err != nil {
+		return fail(err)
+	}
+	if err := netinfo.LeaveWiFi(ctx, fs.Arg(0), *forget, *open); err != nil {
+		return fail(err)
+	}
+	fmt.Printf("Left %s; macOS is rejoining its usual network.\n", fs.Arg(0))
+	return exitOK
 }

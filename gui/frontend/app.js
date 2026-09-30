@@ -53,10 +53,15 @@
       trusted: '',
       wait: '',
       doctor: st ? st.doctor : null,
+      noPassword: st ? st.noPassword : false,
       scan: st ? st.scan : null,
       selected: st ? st.selected : '',
+      // Kept across the engine's own reset on "start": set when arming, and
+      // needed after Cancel. Wiped, the app never tried to rejoin.
+      returnTo: st ? st.returnTo : '',
       password: '',
       joining: '',
+      others: [],
     };
   }
   reset();
@@ -71,6 +76,7 @@
         break;
       case 'joining':
         st.joining = ev.ssid;
+        st.joinedSaved = !!ev.was_saved;
         break;
       case 'waiting':
         st.wait = ev.for;
@@ -89,6 +95,13 @@
       case 'suggest':
         st.suggest = ev.names || [];
         break;
+      case 'refused':
+        // Another site the page may be waiting on; payment ones first.
+        if (!st.others.some((o) => o.name === ev.name) && !st.opened.includes(ev.name)) {
+          st.others.push({ name: ev.name, kind: ev.kind });
+          st.others.sort((a, b) => (a.kind === 'payment' ? 0 : 1) - (b.kind === 'payment' ? 0 : 1));
+        }
+        break;
       case 'note':
         st.note = ev.text;
         break;
@@ -105,10 +118,11 @@
         break;
       case 'done':
         if (ev.cancelled) {
-          const doctor = st.doctor;
+          const { doctor, returnTo } = st;
           reset();
           st.doctor = doctor;
           st.note = 'Cancelled. Your network is back.';
+          goBack(returnTo);
           break;
         }
         if (st.phase !== 'trusted') {
@@ -149,6 +163,7 @@
           const host = ev.note.split(' (')[0];
           if (!st.opened.includes(host)) st.opened.push(host);
           st.suggest = st.suggest.filter((n) => n !== host);
+          st.others = st.others.filter((o) => o.name !== host);
         }
         break;
       case 'AUTHENTICATED':
@@ -246,6 +261,11 @@
       parts.push(`<div class="label">Opened automatically</div>
         <div class="chips">${st.opened.map((h) => `<span class="chip"><b>+</b>${esc(h)}</span>`).join('')}</div>`);
     }
+    if (st.others.length && st.phase === 'login') {
+      parts.push(`<div class="label">Other sites the page may need</div>
+        <p class="quiet small">Open one only if the page is stuck on it, such as a payment step.</p>` +
+        st.others.slice(0, 6).map((o) => `<div class="ask"><span>${esc(o.name)}${o.kind === 'payment' ? ' <em class="tag tag--pay">Payment</em>' : ''}</span><button data-allow="${esc(o.name)}">Open</button></div>`).join(''));
+    }
     if (st.suggest.length && st.phase === 'login') {
       parts.push(`<div class="label">The page may also need</div>` +
         st.suggest.map((n) => `<div class="ask"><span>${esc(n)}</span><button data-allow="${esc(n)}">Open</button></div>`).join(''));
@@ -334,14 +354,14 @@
           ? `Arm on ${st.selected}`
           : `Arm and join ${st.selected}`;
       el.primary.className = 'btn btn--primary';
-      el.hint.innerHTML = '<button class="textlink" data-arm-any>Arm without choosing</button> · you will be asked for your Mac password';
+      el.hint.innerHTML = '<button class="textlink" data-arm-any>Arm without choosing</button> · ' + (st.noPassword ? 'no password needed' : 'you will be asked for your Mac password');
       return;
     }
     el.primary.textContent = running ? 'Cancel' : st.phase === 'error' ? 'Give the network back' : 'Back to networks';
     el.primary.className = running ? 'btn btn--quiet' : 'btn btn--primary';
     el.hint.textContent = running
       ? 'Cancel releases everything and gives the network back.'
-      : 'You will be asked for your Mac password.';
+      : st.noPassword ? 'No password needed: the PortalGuard helper is installed.' : 'You will be asked for your Mac password.';
   }
 
   function countUp() {
@@ -392,6 +412,8 @@
     reset();
     Object.assign(st, { doctor, scan, selected: ssid, phase: 'starting' });
     draw();
+    // Where to come back to: the network the Mac was on when armed.
+    st.returnTo = join && st.scan && st.scan.current && st.scan.current !== join ? st.scan.current : '';
     engine.Arm(join, join ? password : '').catch((e) => {
       const text = String(e);
       if (text.includes('password prompt')) {
@@ -418,8 +440,9 @@
       engine
         .Release()
         .then(() => {
+          goBack();
           backToNetworks();
-          st.note = 'The network is back. If this Mac stayed on that Wi-Fi, choose your usual one.';
+          st.note = 'The network is back, and this Mac is rejoining your usual Wi-Fi.';
           draw();
         })
         .catch((e) => {
@@ -508,11 +531,36 @@
         .catch(() => {});
     refresh();
     window.addEventListener('focus', refresh);
+    engine.HelperInstalled().then((yes) => {
+      st.noPassword = yes;
+      draw();
+    });
     scan();
     // Networks come and go: look again every so often while choosing.
     setInterval(() => {
       if (st.phase === 'idle') scan();
     }, 8000);
+  }
+
+  // goBack rejoins the network the Mac was on before arming, if it left one.
+  // The first time, macOS asks whether PortalGuard may use its saved
+  // password: Always Allow, and it does not ask again.
+  function goBack(to) {
+    const ssid = to !== undefined ? to : st.returnTo;
+    if (!engine || !ssid) return;
+    st.note = `Rejoining ${ssid}…`;
+    draw();
+    engine
+      .Rejoin(ssid)
+      .then(() => {
+        st.note = `Back on ${ssid}.`;
+        draw();
+        setTimeout(scan, 3000);
+      })
+      .catch((e) => {
+        st.note = `Could not rejoin ${ssid} (${e}). Choose it from the Wi-Fi menu.`;
+        draw();
+      });
   }
 
   function backToNetworks() {
@@ -545,7 +593,7 @@
     [100, { type: 'waiting', for: 'login' }],
     [900, { type: 'transition', from: 'GAP_OPEN', event: 'EXTEND_GAP', to: 'GAP_OPEN', note: 'cdn.btwifi.com (same site, automatic)' }],
     [700, { type: 'transition', from: 'GAP_OPEN', event: 'EXTEND_GAP', to: 'GAP_OPEN', note: 'reg.btwifi.com (same site, automatic)' }],
-    [900, { type: 'suggest', names: ['secure.worldpay.com'] }],
+    [900, { type: 'refused', name: 'secure.worldpay.com', kind: 'payment' }],
     [3500, { type: 'transition', from: 'GAP_OPEN', event: 'AUTHENTICATED', to: 'AUTHENTICATED' }],
     [900, { type: 'transition', from: 'AUTHENTICATED', event: 'SEAL', to: 'SEALED' }],
     [100, { type: 'summary', gap_seconds: 6, blocked_out_packets: 524, lookups_refused: 91 }],

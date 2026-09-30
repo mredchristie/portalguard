@@ -10,10 +10,14 @@ export function Cancel():Promise<void>;
 
 export function Doctor():Promise<Array<Record<string, any>>>;
 
+export function HelperInstalled():Promise<boolean>;
+
 export function Networks():Promise<main.Scan>;
 
 export function Open(arg1:string):Promise<void>;
 
 export function OpenURL(arg1:string):Promise<void>;
+
+export function Rejoin(arg1:string):Promise<void>;
 
 export function Release():Promise<void>;

@@ -219,3 +219,17 @@ func parseSCUtilDNS(out string) []ScopedResolver {
 	flush()
 	return all
 }
+
+// parsePreferred reads `networksetup -listpreferredwirelessnetworks`: a
+// heading, then one tab-indented network name per line.
+func parsePreferred(out string) []string {
+	var names []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "\t") {
+			if n := strings.TrimSpace(line); n != "" {
+				names = append(names, n)
+			}
+		}
+	}
+	return names
+}

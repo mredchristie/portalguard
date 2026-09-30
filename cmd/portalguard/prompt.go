@@ -43,7 +43,7 @@ type allowPrompt struct {
 // goes down the feed as notes instead of onto a screen nobody sees.
 func newAllowPrompt(ctx context.Context, sess *state.Session, in *os.File, out io.Writer, g *guide) *allowPrompt {
 	fed := g != nil && g.feed != nil
-	if st, err := in.Stat(); !fed && (err != nil || st.Mode()&os.ModeCharDevice == 0) {
+	if !fed && !isTerminal(in) {
 		return nil
 	}
 	p := &allowPrompt{ctx: ctx, sess: sess, out: out}

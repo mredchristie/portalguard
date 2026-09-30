@@ -670,6 +670,8 @@ flags:
 	if armed {
 		fs.StringVar(&join.ssid, "join", "", "once locked down, join this Wi-Fi network, then detect it")
 		fs.StringVar(&join.passwordFile, "join-password-file", "", "a file holding the -join network's password; deleted once read")
+		fs.BoolVar(&join.returnAfter, "return", false, "with -join: if cancelled from the app, leave that network and let macOS rejoin its usual one")
+		fs.BoolVar(&join.open, "join-open", false, "with -join: the network has no password")
 		next = fs.Bool("next", false, "wait for the next network rather than checking the one this Mac is on now")
 		joinWait = fs.Duration("join-wait", 30*time.Minute, "how long to wait, armed, for a network to join")
 	}
@@ -783,7 +785,7 @@ flags:
 		var res portal.Result
 		if armed {
 			var released bool
-			res, released, err = armedDetect(ctx, sess, g, note, *next, *joinWait, join)
+			res, released, err = armedDetect(ctx, sess, g, note, *next, *joinWait, &join)
 			if err != nil || released {
 				return err
 			}
@@ -826,6 +828,11 @@ flags:
 		sess.UseVerboseDNS(*verbose)
 		if tr != nil {
 			sess.UseDNSTrace(tr.dns)
+		}
+		if fed {
+			sess.UseOtherSiteHook(func(name, kind string) {
+				g.emit("refused", map[string]any{"name": name, "kind": kind})
+			})
 		}
 		if !*noDNSFilter {
 			if err := sess.StartDNSFilter(ctx); err != nil {
@@ -938,6 +945,15 @@ flags:
 		if rerr != nil {
 			g.emit("error", map[string]any{"text": "cancelled, but releasing failed: " + rerr.Error()})
 			return fail(rerr)
+		}
+		if join.ssid != "" && join.returnAfter {
+			lctx, lcancel := context.WithTimeout(context.Background(), 45*time.Second)
+			if lerr := netinfo.LeaveWiFi(lctx, join.ssid, !join.wasSaved, join.open); lerr != nil {
+				g.emit("note", map[string]any{"text": "could not leave " + join.ssid + ": " + lerr.Error()})
+			} else {
+				g.emit("note", map[string]any{"text": "left " + join.ssid + "; macOS is rejoining your usual network"})
+			}
+			lcancel()
 		}
 		g.emit("done", map[string]any{"state": sess.Machine().State(), "cancelled": true})
 		return exitOK

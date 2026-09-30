@@ -2,7 +2,7 @@ package main
 
 /*
 #cgo CFLAGS: -x objective-c -fobjc-arc
-#cgo LDFLAGS: -framework Foundation -framework CoreWLAN -framework CoreLocation
+#cgo LDFLAGS: -framework Foundation -framework CoreWLAN -framework CoreLocation -framework Security
 #import <Foundation/Foundation.h>
 #import <CoreWLAN/CoreWLAN.h>
 #import <CoreLocation/CoreLocation.h>
@@ -70,11 +70,44 @@ static char *pgScan(void) {
 		return strdup(s.UTF8String);
 	}
 }
+// Rejoins a saved network by name: its password from the keychain (macOS asks
+// the user's permission the first time), then an association through
+// CoreWLAN. Returns NULL on success, or why not (the caller frees it).
+static char *pgRejoin(const char *cssid) {
+	@autoreleasepool {
+		CWInterface *iface = [[CWWiFiClient sharedWiFiClient] interface];
+		if (!iface) return strdup("this Mac has no Wi-Fi");
+		NSString *ssid = [NSString stringWithUTF8String:cssid];
+		NSData *ssidData = [ssid dataUsingEncoding:NSUTF8StringEncoding];
+		NSError *err = nil;
+		NSSet<CWNetwork *> *nets = [iface scanForNetworksWithSSID:ssidData error:&err];
+		CWNetwork *net = nets.anyObject;
+		if (!net) return strdup([[NSString stringWithFormat:@"%@ is not in range", ssid] UTF8String]);
+		NSString *password = nil;
+		if (![net supportsSecurity:kCWSecurityNone]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+			OSStatus st = CWKeychainFindWiFiPassword(kCWKeychainDomainSystem, ssidData, &password);
+			if (st != errSecSuccess) {
+				st = CWKeychainFindWiFiPassword(kCWKeychainDomainUser, ssidData, &password);
+			}
+#pragma clang diagnostic pop
+			if (st != errSecSuccess || !password) {
+				return strdup([[NSString stringWithFormat:@"no saved password for %@ that PortalGuard may use", ssid] UTF8String]);
+			}
+		}
+		if (![iface associateToNetwork:net password:password error:&err]) {
+			return strdup([[NSString stringWithFormat:@"could not rejoin %@: %@", ssid, err.localizedDescription] UTF8String]);
+		}
+		return NULL;
+	}
+}
 */
 import "C"
 
 import (
 	"encoding/json"
+	"errors"
 	"sort"
 	"unsafe"
 )
@@ -161,4 +194,15 @@ func tidy(in []Network, current string) ([]Network, int) {
 		return out[i].SSID < out[j].SSID
 	})
 	return out, hidden
+}
+
+// rejoinWiFi puts the Mac back on the saved network ssid. See pgRejoin.
+func rejoinWiFi(ssid string) error {
+	cs := C.CString(ssid)
+	defer C.free(unsafe.Pointer(cs))
+	if e := C.pgRejoin(cs); e != nil {
+		defer C.free(unsafe.Pointer(e))
+		return errors.New(C.GoString(e))
+	}
+	return nil
 }

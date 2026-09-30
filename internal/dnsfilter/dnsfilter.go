@@ -148,6 +148,8 @@ type Server struct {
 	Policy    *Policy
 	// Logf, if set, is told about each refusal the first time a name is seen.
 	Logf func(format string, args ...any)
+	// OnRefused, if set, is told each name the first time it is refused.
+	OnRefused func(name string)
 	// Trace, if set, is told about every query and what became of it:
 	// "forwarded", "auto" (forwarded and opened), "refused" or "servfail".
 	// For reviewing a real network afterwards; Logf only sees first refusals.
@@ -422,6 +424,9 @@ func (s *Server) decide(q []byte, name string) ([]byte, string) {
 		s.mu.Unlock()
 		if first && s.Logf != nil {
 			s.Logf("dns filter: refused %s", name)
+		}
+		if first && s.OnRefused != nil {
+			s.OnRefused(name)
 		}
 		return refusal(q), "refused"
 	}

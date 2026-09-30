@@ -54,6 +54,10 @@ func commands() []command {
 		{"trust", "mark the network you are on as yours: arm stands down there (root)", runTrust},
 		{"untrust", "stop trusting it (root)", runUntrust},
 		{"vpn", "list VPNs, or choose one for the handover to start by itself", runVPN},
+		{"leave", "leave a Wi-Fi network PortalGuard joined, back to the usual one (root)", runLeave},
+		{"install-helper", "run as root in the background, so no command asks for a password again (root, once)", runInstallHelper},
+		{"uninstall-helper", "remove that again (root)", runUninstallHelper},
+		{"helper", "the background helper itself; started by launchd, not by hand", runHelper},
 		{"print-rules", "print the pf ruleset without loading it", runPrintRules},
 		{"install-anchor", "add the portalguard anchor point to /etc/pf.conf (root, once)", runInstallAnchor},
 		{"uninstall-anchor", "remove it again (root)", runUninstallAnchor},
@@ -86,6 +90,11 @@ func run() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Without root, a command that needs it goes to the helper, if one is
+	// installed: no password, no sudo. See helpercmd.go.
+	if viaHelper(args) {
+		return forwardToHelper(args)
+	}
 	for _, c := range commands() {
 		if c.name == name {
 			return c.run(ctx, args[1:])

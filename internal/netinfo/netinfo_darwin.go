@@ -170,3 +170,84 @@ func BindTo(name string) func(network, address string, c syscall.RawConn) error 
 		return serr
 	}
 }
+
+// IsPreferred reports whether macOS has ssid among its saved Wi-Fi networks.
+func IsPreferred(ctx context.Context, ssid string) (bool, error) {
+	dev, err := WiFiDevice(ctx)
+	if err != nil {
+		return false, err
+	}
+	out, err := exec.CommandContext(ctx, "/usr/sbin/networksetup", "-listpreferredwirelessnetworks", dev).Output()
+	if err != nil {
+		return false, err
+	}
+	for _, n := range parsePreferred(string(out)) {
+		if n == ssid {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// LeaveWiFi takes this Mac off ssid and back to its usual network, by turning
+// Wi-Fi off and on so macOS rejoins its best saved network with its own saved
+// password. No password passes through here.
+//
+// macOS would pick the portal network straight back if it is saved: at EE
+// WiFi it did, unprotected, with its own login window on top. So an open
+// network is taken out of the saved list while macOS chooses, and put back
+// where it was once the Mac is on something else. Open, it has no password to
+// lose. forget leaves it out (it was saved only because PortalGuard joined
+// it). A secured network is never removed: its password would go with it.
+func LeaveWiFi(ctx context.Context, ssid string, forget, open bool) error {
+	dev, err := WiFiDevice(ctx)
+	if err != nil {
+		return err
+	}
+	ns := func(args ...string) (string, error) {
+		out, err := exec.CommandContext(ctx, "/usr/sbin/networksetup", args...).CombinedOutput()
+		if err != nil {
+			return "", fmt.Errorf("networksetup %s: %w: %s", args[0], err, strings.TrimSpace(string(out)))
+		}
+		return string(out), nil
+	}
+	list, err := ns("-listpreferredwirelessnetworks", dev)
+	if err != nil {
+		return err
+	}
+	index := -1
+	for i, n := range parsePreferred(list) {
+		if n == ssid {
+			index = i
+		}
+	}
+	remove := index >= 0 && (forget || open)
+	putBack := remove && !forget
+	if remove {
+		if _, err := ns("-removepreferredwirelessnetwork", dev, ssid); err != nil {
+			return err
+		}
+	}
+	if _, err := ns("-setairportpower", dev, "off"); err != nil {
+		return err
+	}
+	time.Sleep(time.Second)
+	if _, err := ns("-setairportpower", dev, "on"); err != nil {
+		return err
+	}
+	if !putBack {
+		return nil
+	}
+	// Back in the list once the Mac is on another network (or after 20
+	// seconds on none): a saved network is not switched to while the Mac is
+	// connected elsewhere.
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if r, err := Default(ctx); err == nil && r.Gateway != nil {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+	_, err = ns("-addpreferredwirelessnetworkatindex", dev, ssid, fmt.Sprint(index), "OPEN")
+	return err
+}

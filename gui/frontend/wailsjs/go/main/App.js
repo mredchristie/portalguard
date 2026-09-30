@@ -18,6 +18,10 @@ export function Doctor() {
   return window['go']['main']['App']['Doctor']();
 }
 
+export function HelperInstalled() {
+  return window['go']['main']['App']['HelperInstalled']();
+}
+
 export function Networks() {
   return window['go']['main']['App']['Networks']();
 }
@@ -28,6 +32,10 @@ export function Open(arg1) {
 
 export function OpenURL(arg1) {
   return window['go']['main']['App']['OpenURL'](arg1);
+}
+
+export function Rejoin(arg1) {
+  return window['go']['main']['App']['Rejoin'](arg1);
 }
 
 export function Release() {

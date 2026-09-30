@@ -118,3 +118,11 @@ resolver #2
 		t.Errorf("second resolver = %+v", got[1])
 	}
 }
+
+func TestParsePreferred(t *testing.T) {
+	out := "Preferred networks on en0:\n\tHomeWiFi\n\tEE WiFi\n\tBTWi-fi\n"
+	got := parsePreferred(out)
+	if len(got) != 3 || got[0] != "HomeWiFi" || got[2] != "BTWi-fi" {
+		t.Errorf("parsePreferred = %q", got)
+	}
+}

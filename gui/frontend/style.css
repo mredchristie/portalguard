@@ -570,6 +570,11 @@ body {
   color: var(--muted);
   border: 1px solid var(--faint);
 }
+.tag--pay {
+  color: var(--amber);
+  border-color: rgba(255, 212, 121, 0.4);
+  margin-left: 6px;
+}
 .tag--open {
   color: var(--green);
   border-color: rgba(0, 255, 136, 0.35);

@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -140,14 +141,27 @@ func (p *Prober) Detect(ctx context.Context) Result {
 		probes = DefaultProbes()
 	}
 
-	res := Result{At: start, Probes: make([]ProbeResult, 0, len(probes))}
-	for _, pr := range probes {
-		res.Probes = append(res.Probes, p.runProbe(ctx, pr))
+	// All at once: each can wait out its own timeout on a slow network, and
+	// one after another they added up (9.7 seconds at EE WiFi, where 0.9 was
+	// usual). Results keep the probe list's order, so classification is
+	// exactly as before.
+	res := Result{At: start, Probes: make([]ProbeResult, len(probes))}
+	var wg sync.WaitGroup
+	for i, pr := range probes {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			res.Probes[i] = p.runProbe(ctx, pr)
+		}()
 	}
-
 	if !p.SkipDNSCheck {
-		res.DNS = p.checkDNS(ctx, probes)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			res.DNS = p.checkDNS(ctx, probes)
+		}()
 	}
+	wg.Wait()
 
 	p.classify(&res)
 

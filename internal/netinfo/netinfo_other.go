@@ -31,3 +31,9 @@ func ScopedDNS(context.Context) []ScopedResolver { return nil }
 
 // BindTo is not implemented off macOS: sockets use the routing table.
 func BindTo(string) func(network, address string, c syscall.RawConn) error { return nil }
+
+// IsPreferred is not implemented off macOS.
+func IsPreferred(context.Context, string) (bool, error) { return false, ErrUnsupported }
+
+// LeaveWiFi is not implemented off macOS.
+func LeaveWiFi(context.Context, string, bool, bool) error { return ErrUnsupported }

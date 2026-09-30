@@ -108,6 +108,21 @@ func (s *Session) StartDNSFilter(ctx context.Context) error {
 		srv.Logf = s.logf
 	}
 	srv.Trace = trace
+	s.mu.Lock()
+	onOther := s.otherSite
+	s.mu.Unlock()
+	if onOther != nil {
+		site := siteOf(res.PortalHost)
+		srv.OnRefused = func(name string) {
+			// The portal's own site is auto-allow's, or the suggestion's.
+			if site != "" && sameSite(name, site) {
+				return
+			}
+			if kind := OtherSiteKind(name); kind != "" {
+				onOther(name, kind)
+			}
+		}
+	}
 	var auto *autoAllow
 	site := autoAllowSite(res.PortalHost)
 	if autoOn && site != "" {
@@ -140,6 +155,15 @@ func (s *Session) StartDNSFilter(ctx context.Context) error {
 func (s *Session) UseVerboseDNS(on bool) {
 	s.mu.Lock()
 	s.dnsVerbose = on
+	s.mu.Unlock()
+}
+
+// UseOtherSiteHook has the login's filter report refused names on other
+// sites that may be what the page is waiting for (a card processor, say), and
+// not background noise. Takes effect at StartDNSFilter. See OtherSiteKind.
+func (s *Session) UseOtherSiteHook(f func(name, kind string)) {
+	s.mu.Lock()
+	s.otherSite = f
 	s.mu.Unlock()
 }
 

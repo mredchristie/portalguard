@@ -66,6 +66,9 @@ type Session struct {
 	// so a login stuck on another domain (a payment page) can be spotted
 	// while it is happening. See UseVerboseDNS.
 	dnsVerbose bool
+	// otherSite is told about refused names on other sites worth offering to
+	// open. See UseOtherSiteHook.
+	otherSite func(name, kind string)
 	// dnsTrace is told about every query the filter answers. See UseDNSTrace.
 	dnsTrace func(name, qtype, verdict string)
 

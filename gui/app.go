@@ -7,15 +7,19 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
+
+	"portalguard/internal/helper"
 )
 
 // App is what the page calls: window.go.main.App.
@@ -32,6 +36,17 @@ type App struct {
 	dir     string
 	in      *os.File // the FIFO's write end: the engine's stdin
 	running bool
+
+	// hc is the connection to the helper, when the run goes through it
+	// instead of the password prompt: no password, and no FIFO.
+	hc   net.Conn
+	hcMu sync.Mutex
+}
+
+// helperUp reports whether the background helper is installed and listening.
+func helperUp() bool {
+	_, err := os.Stat(helper.SocketPath)
+	return err == nil
 }
 
 func NewApp() *App { return &App{} }
@@ -50,6 +65,9 @@ func (a *App) startup(ctx context.Context) {
 // and releases the firewall: a closed app never leaves the network locked.
 func (a *App) shutdown(context.Context) { a.finish() }
 
+// HelperInstalled tells the page whether arming will ask for a password.
+func (a *App) HelperInstalled() bool { return helperUp() }
+
 // Networks scans for Wi-Fi networks in range, for the list.
 func (a *App) Networks() Scan { return scanWiFi() }
 
@@ -67,6 +85,13 @@ func (a *App) Arm(ssid, password string) error {
 	defer a.mu.Unlock()
 	if a.running {
 		return errors.New("already running")
+	}
+	if helperUp() {
+		args := []string{"arm", "-json"}
+		if ssid != "" {
+			args = append(args, "-join", ssid)
+		}
+		return a.armViaHelper(args, password)
 	}
 	bin, err := engineBinary()
 	if err != nil {
@@ -99,6 +124,8 @@ func (a *App) Arm(ssid, password string) error {
 	// password on a command line would be visible to every process.
 	join := ""
 	if ssid != "" {
+		// -return: if cancelled here, the engine leaves this network again
+		// and macOS rejoins its usual one.
 		join = " -join " + shq(ssid)
 		if password != "" {
 			pw := filepath.Join(dir, "pw")
@@ -137,6 +164,13 @@ func (a *App) Arm(ssid, password string) error {
 // still in place: the engine fails closed, and has exited, so this is a new
 // `portalguard release` through the password prompt.
 func (a *App) Release() error {
+	if helperUp() {
+		out, code, err := runViaHelper("release")
+		if err == nil && code != 0 {
+			err = errors.New(strings.TrimSpace(out))
+		}
+		return err
+	}
 	bin, err := engineBinary()
 	if err != nil {
 		return err
@@ -152,6 +186,35 @@ func (a *App) Release() error {
 	return nil
 }
 
+// Rejoin puts the Mac back on the network it was on before arming, by name:
+// macOS alone would pick any saved network in range (at EE WiFi it picked the
+// portal again, then a phone's hotspot).
+func (a *App) Rejoin(ssid string) error {
+	err := rejoinWiFi(ssid)
+	appLog("rejoin %q: %v", ssid, err)
+	return err
+}
+
+// appLog notes what the app did itself, beside the engine's traces in
+// ~/Library/Logs/PortalGuard: the engine cannot see a rejoin, which happens
+// here, after it has finished.
+func appLog(format string, args ...any) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	dir := filepath.Join(home, "Library", "Logs", "PortalGuard")
+	if os.MkdirAll(dir, 0o700) != nil {
+		return
+	}
+	f, err := os.OpenFile(filepath.Join(dir, "app.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "%s %s\n", time.Now().Format("2006-01-02 15:04:05"), fmt.Sprintf(format, args...))
+}
+
 // Cancel asks the engine to stop and give the network back.
 func (a *App) Cancel() { a.send("cancel") }
 
@@ -164,11 +227,21 @@ func (a *App) OpenURL(url string) { runtime.BrowserOpenURL(a.ctx, url) }
 // Doctor is `portalguard doctor -json`, for the idle screen. It runs as this
 // user, so it cannot see the firewall itself; everything else it can.
 func (a *App) Doctor() ([]map[string]any, error) {
-	bin, err := engineBinary()
-	if err != nil {
-		return nil, err
+	var out []byte
+	if helperUp() {
+		// Through the helper, doctor can see the firewall too.
+		s, _, err := runViaHelper("doctor", "-json")
+		if err != nil {
+			return nil, err
+		}
+		out = []byte(s)
+	} else {
+		bin, err := engineBinary()
+		if err != nil {
+			return nil, err
+		}
+		out, _ = exec.Command(bin, "doctor", "-json").Output()
 	}
-	out, _ := exec.Command(bin, "doctor", "-json").Output()
 	var fs []map[string]any
 	if err := json.Unmarshal(out, &fs); err != nil {
 		return nil, fmt.Errorf("doctor: %w", err)
@@ -179,8 +252,93 @@ func (a *App) Doctor() ([]map[string]any, error) {
 func (a *App) send(line string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.hc != nil {
+		a.hcMu.Lock()
+		_ = helper.WriteFrame(a.hc, helper.Stdin, []byte(strings.TrimSpace(line)+"\n"))
+		a.hcMu.Unlock()
+		return
+	}
 	if a.in != nil {
 		fmt.Fprintln(a.in, strings.TrimSpace(line))
+	}
+}
+
+// armViaHelper runs the engine through the helper: its feed arrives as the
+// helper's stdout frames, and clicks go back as stdin frames. Closing the
+// connection is the app going away, and the helper interrupts the run, which
+// gives the network back. The caller holds a.mu.
+func (a *App) armViaHelper(args []string, password string) error {
+	c, err := net.Dial("unix", helper.SocketPath)
+	if err != nil {
+		return fmt.Errorf("the helper is not answering: %w", err)
+	}
+	req, _ := helper.MarshalRequest(helper.Request{Args: args, Password: password})
+	if err := helper.WriteFrame(c, helper.Meta, req); err != nil {
+		c.Close()
+		return err
+	}
+	a.hc, a.running = c, true
+	go a.readHelper(c)
+	return nil
+}
+
+func (a *App) readHelper(c net.Conn) {
+	var partial strings.Builder
+	defer a.finish()
+	for {
+		k, p, err := helper.ReadFrame(c)
+		if err != nil {
+			return
+		}
+		switch k {
+		case helper.Stdout:
+			partial.Write(p)
+			for {
+				s := partial.String()
+				i := strings.IndexByte(s, '\n')
+				if i < 0 {
+					break
+				}
+				partial.Reset()
+				partial.WriteString(s[i+1:])
+				var ev map[string]any
+				if json.Unmarshal([]byte(s[:i]), &ev) == nil {
+					a.emit(ev)
+				}
+			}
+		case helper.Stderr:
+			appLog("engine: %s", strings.TrimSpace(string(p)))
+		case helper.Exit:
+			return
+		}
+	}
+}
+
+// runViaHelper runs one short command through the helper and returns its
+// output, for release and doctor.
+func runViaHelper(args ...string) (string, int, error) {
+	c, err := net.Dial("unix", helper.SocketPath)
+	if err != nil {
+		return "", 1, err
+	}
+	defer c.Close()
+	req, _ := helper.MarshalRequest(helper.Request{Args: args})
+	if err := helper.WriteFrame(c, helper.Meta, req); err != nil {
+		return "", 1, err
+	}
+	var out strings.Builder
+	for {
+		k, p, err := helper.ReadFrame(c)
+		if err != nil {
+			return out.String(), 1, err
+		}
+		switch k {
+		case helper.Stdout, helper.Stderr:
+			out.Write(p)
+		case helper.Exit:
+			code, _ := strconv.Atoi(string(p))
+			return out.String(), code, nil
+		}
 	}
 }
 
@@ -243,6 +401,10 @@ func (a *App) emit(ev map[string]any) {
 func (a *App) finish() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.hc != nil {
+		a.hc.Close()
+		a.hc = nil
+	}
 	if a.in != nil {
 		a.in.Close()
 		a.in = nil

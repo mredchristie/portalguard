@@ -1,155 +1,105 @@
-# Portalguard
+# PortalGuard
 
 Log in to public Wi-Fi without leaking everything else.
 
-A full-tunnel VPN and a captive portal cannot both go first: the VPN can't
-connect until you log in, and the login page can't load through the VPN. So
-everyone turns the VPN off, logs in, and turns it back on, and for that whole
-window every app on the machine talks to an untrusted network in the clear.
+A captive portal blocks everything until you log in, and your VPN can't get
+through that block. So you turn the VPN off to log in, and every app on the
+Mac talks to the network in the clear. PortalGuard closes that window on
+macOS, with the firewall built into the kernel (pf):
 
-Portalguard closes that window on macOS, using the firewall built into the
-kernel (pf):
+1. **Arm.** Everything is blocked, before the Mac even joins the network.
+2. **Gap open.** Only the login page's addresses get out, and only its names
+   in DNS. Hosts on the portal's own site open as the page asks for them.
+3. **Sealed.** Once a re-probe sees the real internet, the gap closes.
+4. **Handed off.** It starts your VPN; only the VPN may connect until its
+   tunnel is up, then PortalGuard steps aside.
 
-1. **Detects** the portal and pins its addresses.
-2. **Locks down** all traffic.
-3. **Opens a gap** for the login page only. While it is open, DNS goes
-   through a filter that lets out only the login's own names.
-4. **Seals** the gap once a re-probe sees the real internet.
-5. **Hands over** to your VPN: only VPN traffic may leave until the tunnel is
-   up, then Portalguard steps aside.
+You log in yourself. It never types a password or clicks accept for you.
 
-It never types a password or clicks accept for you. You log in yourself;
-Portalguard only controls the firewall around that moment.
+## Install
 
-## Quick start
-
-```fish
-make build
-sudo ./bin/portalguard install-anchor    # once per machine; adds two lines to /etc/pf.conf
-./bin/portalguard detect -v             # read-only: is there a portal?
-sudo ./bin/portalguard run              # the whole flow
+```sh
+sudo make install                  # portalguard on your PATH
+sudo portalguard install-anchor    # once: adds two lines to /etc/pf.conf
+sudo portalguard install-helper    # once: no password prompts after this
+make app                           # gui/build/bin/PortalGuard.app
 ```
 
-`run` talks you through it in plain numbered steps (`-verbose` shows the
-technical log instead), opens the login page in your browser, and waits. Hosts on the portal's
-own site (`cdn.btwifi.com` for `www.btwifi.com`) open as the page asks for
-them, so it renders first time.
+`portalguard doctor` says whether the Mac is ready.
 
-Anything else stays shut, including a payment page on another domain. If the
-page stalls, run with `-verbose`: every refused name is listed as it happens,
-and typing one into the same terminal opens it. `sudo portalguard allow
-<host>` from a second terminal does the same. `sudo portalguard remember` then
-saves what you opened, and next time it opens by itself, but only after each
-host passes a fresh TLS certificate check.
+## Use it
 
-`sudo make install` puts the binary on your PATH as `portalguard`.
+**The app:** pick the Wi-Fi network and press **Arm**. It locks the Mac,
+joins the network, opens the login page in your browser, and starts your VPN
+once you have signed in. Cancel stays locked until the Mac is back on its
+usual Wi-Fi, then lets go.
 
-**Better still: arm before you join.** Everything leaks in the first seconds
-after a Mac joins a network, before you could type anything. `sudo
-portalguard arm`, then join the Wi-Fi: the lockdown is already there, it
-detects the portal through it, and carries on as `run` does. On an open
-network it goes straight to VPN-only, and on one you have marked with
-`portalguard trust` it stands down.
+**The terminal:**
 
-## The app
+```sh
+portalguard arm -join "BTWi-fi"   # the same flow, talked through step by step
+portalguard run                   # already joined: detect, then lock down
+```
 
-`make app` builds `gui/build/bin/PortalGuard.app`: a window with one Arm
-button that runs the same engine and shows its progress as it happens. It
-asks for your Mac password each time you arm, so nothing is installed on the
-system, and closing it always gives the network back. It reads the engine's
-progress feed ([`docs/feed.md`](docs/feed.md)) and never touches the
-firewall itself. Each run's trace is kept in `~/Library/Logs/PortalGuard/`.
-It is signed for this Mac only, not yet for handing to anyone else.
+If the login page stalls on a host from another site (a card processor, say),
+the app offers it to open; in the terminal, type its name, or run
+`portalguard allow <host>` from a second one.
 
 ## Commands
 
-| Command | Root | What it does |
-| --- | --- | --- |
-| `detect` | | Classify the network. Changes nothing. Exit code 0 open, 10 portal, 20 no network. |
-| `check` | | One request: prints `internet: reachable` or `blocked`. |
-| `doctor` | | Is this Mac ready to run? Read-only; checks the firewall too with sudo. |
-| `status` | yes | What pf is actually enforcing, and whether it is still in force. |
-| `run` | yes | The whole flow, from detection to handover. |
-| `arm` | yes | Like `run`, but locks down first: arm, then join the Wi-Fi, and nothing leaks while it connects. |
-| `trust [label]` | yes | Mark the network you are on as yours: `arm` stands down there. `-list` to see them. |
-| `untrust` | yes | Stop trusting it. |
-| `vpn list` / `vpn use <name>` | `use`: yes | Choose a VPN for the handover to start by itself (any in macOS's own VPN settings, WireGuard's included). |
-| `lockdown` | yes | Block everything. |
-| `allow [host[:port]...]` | yes | Open the gap, or widen it for named hosts. |
-| `remember` | yes | Save the hosts you allowed, for next time. |
-| `seal` | yes | Close the gap, keep the lockdown. |
-| `handoff` | yes | Keep the lockdown, let only your VPN out, step aside when it is up. |
-| `release` | yes | Remove every rule. The escape hatch. |
-| `install-anchor` | yes | One-time setup, or put the hooks back if something replaced pf's rules. |
-| `uninstall-anchor` | yes | Undo that. |
+| Command | What it does |
+| --- | --- |
+| `arm`, `run` | The whole flow. `arm` locks down first; `run` detects first |
+| `detect`, `check`, `doctor`, `status` | Read-only: classify the network, test reachability, readiness, what pf enforces |
+| `trust`, `untrust` | Mark the network you are on as yours: `arm` stands down there |
+| `vpn list`, `vpn use <name>` | Choose the VPN the handover starts |
+| `allow`, `remember` | Open more hosts; save them for next time (verified by TLS) |
+| `lockdown`, `seal`, `handoff`, `release` | Each step by hand. `release` removes every rule |
+| `install-helper`, `install-anchor` | One-time setup, with matching `uninstall-` commands |
 
-Useful `run` flags: `-vpn host:port/proto` (a VPN on unusual ports),
-`-verbose` (every name refused, as it happens), `-trace file` (a
-timestamped record of the run and every DNS verdict), `-no-auto-allow`,
-`-no-handoff`, `-no-dns-filter`, `-redact` (share a report without naming
-your services).
+Useful flags: `-verbose` (every refused name, live), `-trace file`, `-json`
+(the [progress feed](docs/feed.md) the app reads).
 
 ## If something goes wrong
 
-**If Portalguard dies, your network comes back.** Every rule lives in one pf
-anchor, nothing is written to disk, and a crash, Ctrl+C or panic releases the
-rules. For the cases no handler can catch (`kill -9`, a power cut):
+Every rule lives in one pf anchor. A crash, Ctrl+C, closing the app or a
+reboot gives the network back. For anything else:
 
-```fish
-sudo pfctl -a portalguard -F all    # or: make rescue
+```sh
+sudo pfctl -a portalguard -F all   # or: make rescue
 ```
 
-A reboot also clears everything.
+Run it before your VPN, not beside it. NordVPN's kill switch replaces pf's
+rules; quit NordVPN before arming, and `install-anchor` puts the hooks back.
 
-## Using it with a VPN
+## Proven
 
-Run Portalguard **before** your VPN, not beside it; it refuses to lock down
-while a tunnel holds the default route. After the login it hands over by
-itself: connect your VPN when it says so.
+- **EE WiFi, paid (£5.99), end to end in the app.** Login page 13.5 s after
+  Arm; EE's payment page opened by itself; 534 packets blocked and 341
+  lookups refused during the login; VPN up 0.5 s after signing in.
+- **BT Wi-Fi.** Found the blank login page that auto-allow now fixes.
+- **The lab.** An off-machine test portal in containers, a hostile one, real
+  pf end to end, and fuzzing of everything that reads the network.
 
-Some VPNs bring their own firewall. NordVPN's kill switch replaces pf's rules
-when it connects and leaves some behind after it disconnects. Portalguard
-detects that and says so rather than claim a lockdown it no longer controls;
-`sudo portalguard install-anchor` puts its own rules back.
-
-## What is proven
-
-On real pf, with a portal that is genuinely off the machine:
-
-- **The lockdown blocks, the gap is narrow, the seal closes it.** `make e2e`,
-  38 checks, including the VPN handover on the wire and the DNS filter.
-- **Only the login's names leave during the gap.** The test portal's own DNS
-  server heard nothing else, where the same run without the filter leaked 20
-  names.
-- **The login page renders first time.** `make hotspot-auto`: the portal's
-  own hosts opened as the page asked for them, with no `allow`, and a
-  lookalike domain was still refused.
-- **A real portal.** BT Wi-Fi: blank page diagnosed, `allow` from a second
-  terminal, logged in, sealed.
-
-The full list, and what is not proven yet (a hostile network, a VPN that
-depends on the handover hole, roaming), is in
+Details in [`docs/field-notes.md`](docs/field-notes.md) and
 [`docs/architecture.md`](docs/architecture.md).
 
 ## Development
 
-```fish
-make test          # unit tests, no root needed
-make e2e           # real pf; cuts the network on purpose (see testenv/README.md)
-make hotspot-demo  # a BT-shaped test portal in containers, off the machine
-make preflight     # every hotspot run back to back, before a field test
+```sh
+make test        # unit tests, no root
+make e2e         # real pf; cuts the network on purpose
+make fuzz        # the parsers that read untrusted input
+make preflight   # all ten suites, before a field test
 ```
 
-## Docs
-
-| | |
+| Doc | |
 | --- | --- |
-| [`architecture.md`](docs/architecture.md) | How the pieces fit, what is proven and what is not |
-| [`pf-design.md`](docs/pf-design.md) | Every firewall rule, the DNS filter, the handover, living with VPNs |
-| [`gap-scope.md`](docs/gap-scope.md) | How wide the gap should be, and why that is the hard part |
-| [`field-notes.md`](docs/field-notes.md) | The BT Wi-Fi trips, and reproducing the leak at home |
-| [`feed.md`](docs/feed.md) | `-json`: the progress feed a GUI reads |
-| [`demo.md`](docs/demo.md) | Capturing the leak yourself, and redacting it |
-| [`testenv/README.md`](testenv/README.md) | The test portals and how each test works |
+| [`architecture.md`](docs/architecture.md) | How the pieces fit, and what is and is not proven |
+| [`pf-design.md`](docs/pf-design.md) | Every firewall rule, the DNS filter, the handover |
+| [`gap-scope.md`](docs/gap-scope.md) | How wide the gap should be |
+| [`field-notes.md`](docs/field-notes.md) | BT and EE, trip by trip |
+| [`feed.md`](docs/feed.md) | The `-json` progress feed |
+| [`testenv/README.md`](testenv/README.md) | The test portals |
 
-macOS only. Linux and Windows backends are designed but not built.
+macOS only. Linux and Windows are designed but not built.

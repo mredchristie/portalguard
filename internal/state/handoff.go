@@ -86,6 +86,14 @@ type HandOffResult struct {
 //
 // If no tunnel comes up it closes the VPN hole again and returns ErrNoTunnel,
 // leaving the machine locked down, not open.
+// UseVPNConnect has HandOff start the VPN itself, once its hole is open,
+// rather than wait for the user to.
+func (s *Session) UseVPNConnect(f func(context.Context) error) {
+	s.mu.Lock()
+	s.vpnConnect = f
+	s.mu.Unlock()
+}
+
 func (s *Session) HandOff(ctx context.Context, endpoints []firewall.Endpoint, wait time.Duration) (HandOffResult, error) {
 	var res HandOffResult
 	if !s.machine.Can(EventHandOff) {
@@ -106,6 +114,16 @@ func (s *Session) HandOff(ctx context.Context, endpoints []firewall.Endpoint, wa
 		return res, fmt.Errorf("hand off: %w", err)
 	}
 	s.logf("waiting for a VPN tunnel; only %s may leave", describeEndpoints(endpoints))
+	// Started only now: before the hole, its handshake would be dropped and
+	// the client would sit backing off while the wait ran out.
+	s.mu.Lock()
+	connect := s.vpnConnect
+	s.mu.Unlock()
+	if connect != nil {
+		if err := connect(ctx); err != nil {
+			s.logf("could not start the VPN (%v); it can still be connected by hand", err)
+		}
+	}
 
 	waitCtx, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()

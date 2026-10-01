@@ -53,7 +53,7 @@ func TestPromptNeedsATerminal(t *testing.T) {
 	}
 	defer r.Close()
 	defer w.Close()
-	p := newAllowPrompt(context.Background(), nil, r, &bytes.Buffer{})
+	p := newAllowPrompt(context.Background(), nil, r, &bytes.Buffer{}, nil)
 	if p != nil {
 		t.Fatal("prompted on a pipe")
 	}
@@ -74,5 +74,21 @@ func TestPromptOpensATypedHost(t *testing.T) {
 	p.answer("Pay.Example.com")
 	if !strings.Contains(out.String(), "could not open pay.example.com") {
 		t.Fatalf("the typed host was not tried: %q", out.String())
+	}
+}
+
+// TestAppCancelAndAppGone: a GUI's "cancel" ends the run, and so does its
+// stdin ending, because an app that has gone can no longer release anything.
+func TestAppCancelAndAppGone(t *testing.T) {
+	var why []string
+	p := &allowPrompt{ctx: context.Background(), out: &bytes.Buffer{},
+		cancel: func(w string) { why = append(why, w) }}
+	p.answer("  Cancel ")
+	if len(why) != 1 || !strings.Contains(why[0], "cancelled") {
+		t.Fatalf("cancel line: %v", why)
+	}
+	p.read(strings.NewReader("")) // the app closed its end
+	if len(why) != 2 || !strings.Contains(why[1], "app closed") {
+		t.Fatalf("stdin ending: %v", why)
 	}
 }

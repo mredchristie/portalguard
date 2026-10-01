@@ -13,7 +13,7 @@ set -u
 cd "$(dirname "$0")/.."
 
 SUMMARY=$(mktemp)
-trap './testenv/hotspot.sh down >/dev/null 2>&1; rm -f "$SUMMARY" "${TRACE:-}"' EXIT
+trap './testenv/hotspot.sh down >/dev/null 2>&1; rm -f "$SUMMARY" "${TRACE:-}" "${FEED:-}"' EXIT
 trap 'exit 130' INT TERM
 
 suite() {
@@ -36,6 +36,12 @@ suite "auto-allow: page renders first time" sudo TRACE="$TRACE" ./testenv/hotspo
 # The trace the field test will depend on: it has to hold the automatic
 # opens as DNS verdicts, not just the printed lines.
 suite "trace records the DNS verdicts" grep -q 'dns   auto .*cdn.guestwifi.test' "$TRACE"
+suite "armed: locked before the join, detected through the lockdown" sudo ./testenv/hotspot-demo.sh armed
+# The same login with -json: every line on stdout must be an event a GUI can
+# read, and the ones it depends on must arrive.
+FEED=$(mktemp -t portalguard-feed)
+suite "progress feed: a whole login as JSON events" sudo JSON=1 TRACE="$FEED" ./testenv/hotspot-demo.sh auto
+suite "progress feed: well formed" python3 testenv/check-feed.py "$FEED"
 suite "manual: blank page, allow, remember" sudo ./testenv/hotspot-demo.sh first
 suite "known network: remembered hosts verified" sudo ./testenv/hotspot-demo.sh known
 # The attacks. hostile-known needs the hosts the manual run remembered, so it

@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"portalguard/internal/firewall"
@@ -65,8 +66,20 @@ func vpnFlag(fs *flag.FlagSet) *bool {
 
 // logf is the CLI's logger: plain lines on stderr so stdout stays parseable.
 func logf(format string, args ...any) {
+	if quietLog {
+		// Guided run: the technical line is for the record, not the screen.
+		activeTrace.line("log", fmt.Sprintf("portalguard: "+format, args...))
+		return
+	}
 	fmt.Fprintf(os.Stderr, "portalguard: "+format+"\n", args...)
 }
+
+// quietLog sends logf to the -trace file only, while a guided run tells the
+// screen what is happening in plain words. activeTrace is that file, if any.
+var (
+	quietLog    bool
+	activeTrace *tracer
+)
 
 // ==== read-only commands ==================================================
 // Status just reports. It changes nothing.
@@ -524,6 +537,19 @@ func sessionLine(st firewall.Status) string {
 // verified against real ground truth (e.g. by the e2e suite, checking that
 // nothing raw reached what got displayed or recorded) without the real
 // hostnames ever appearing on screen. Most callers leave it empty.
+// writeAuditLog writes the full report to path, for a guided run, which
+// prints only a summary. See printReport's auditLog.
+func writeAuditLog(sess *state.Session, path string) {
+	if path == "" {
+		return
+	}
+	if rep, ok := sess.Report(); ok && !rep.Empty() {
+		if err := os.WriteFile(path, []byte(rep.String()), 0o600); err != nil {
+			logf("could not write -audit-log %s: %v", path, err)
+		}
+	}
+}
+
 func printReport(sess *state.Session, redact, verbose bool, auditLog string) {
 	rep, ok := sess.Report()
 	if !ok {
@@ -601,8 +627,17 @@ func printSuggestion(names []string) {
 // ==== the whole flow ======================================================
 // detect, lock down, open the gap, wait for you to log in, seal.
 
-func runFlow(ctx context.Context, args []string) int {
-	fs := flag.NewFlagSet("run", flag.ContinueOnError)
+func runFlow(ctx context.Context, args []string) int { return runFlowMode(ctx, args, false) }
+
+// runArm is run with the lockdown first: see internal/state/armed.go.
+func runArm(ctx context.Context, args []string) int { return runFlowMode(ctx, args, true) }
+
+func runFlowMode(ctx context.Context, args []string, armed bool) int {
+	name := "run"
+	if armed {
+		name = "arm"
+	}
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.Usage = func() {
 		fmt.Fprint(os.Stderr, `usage: portalguard run [flags]
 
@@ -622,33 +657,72 @@ flags:
 	poll := fs.Duration("poll", 3*time.Second, "how often to re-probe while waiting")
 	allowVPN := vpnFlag(fs)
 	redact := fs.Bool("redact", false, "generalise hostnames in the leak report to categories, for output you plan to share")
-	verbose := fs.Bool("verbose", false, "list every name refused during the gap, not only the portal's own, and why process attribution backed off if it did")
+	verbose := fs.Bool("verbose", false, "show the technical log and the full report instead of plain steps, and list every name refused as it happens")
 	var vpns endpointFlags
 	fs.Var(&vpns, "vpn", vpnFlagHelp)
 	noHandoff := fs.Bool("no-handoff", false, "stop at SEALED instead of handing over to your VPN")
 	noDNSFilter := fs.Bool("no-dns-filter", false, "let the gap's DNS go straight to the network's resolver, for every app, as v0.2 did")
 	noAutoAllow := fs.Bool("no-auto-allow", false, "never open the portal's own hosts automatically; suggest them for allow instead, as v0.3 did")
 	handoffWait := fs.Duration("handoff-wait", 3*time.Minute, "how long to wait for the VPN tunnel after sealing")
+	var next *bool
+	var joinWait *time.Duration
+	var join joinSpec
+	if armed {
+		fs.StringVar(&join.ssid, "join", "", "once locked down, join this Wi-Fi network, then detect it")
+		fs.StringVar(&join.passwordFile, "join-password-file", "", "a file holding the -join network's password; deleted once read")
+		fs.BoolVar(&join.returnAfter, "return", false, "with -join: if cancelled from the app, leave that network and let macOS rejoin its usual one")
+		fs.BoolVar(&join.open, "join-open", false, "with -join: the network has no password")
+		next = fs.Bool("next", false, "wait for the next network rather than checking the one this Mac is on now")
+		joinWait = fs.Duration("join-wait", 30*time.Minute, "how long to wait, armed, for a network to join")
+	}
+	asJSON := fs.Bool("json", false, "report progress as JSON lines on stdout instead of text, for a GUI; stdin then takes host names to open")
 	tracePath := fs.String("trace", "", "record everything this run prints, and every DNS query with what the filter did, timestamped, to this file (holds real hostnames)")
 	auditLog := fs.String("audit-log", "", "write the full, unredacted report to this file (never to stdout) - for verifying a -redact run against ground truth without displaying it")
 	if err := fs.Parse(args); err != nil {
 		return exitUsageError
 	}
+	// Plain steps when a person is watching, the technical log when a script
+	// is: e2e and anything else that captures run's output reads the log.
+	// Decided before -trace swaps stdout for a pipe.
+	var g *guide
+	switch {
+	case *asJSON:
+		g = newFeed(stdout{})
+		quietLog = true
+		defer func() { quietLog = false }()
+	case !*verbose && isTerminal(os.Stdout):
+		g = &guide{out: stdout{}}
+		quietLog = true
+		defer func() { quietLog = false }()
+	}
+	// note tells the user something that matters in either mode.
+	note := func(format string, args ...any) {
+		logf(format, args...)
+		g.sayf("note: "+format, args...)
+		g.emit("note", map[string]any{"text": fmt.Sprintf(format, args...)})
+	}
+
 	// First, so a run that fails its preflight is on record too.
 	var tr *tracer
 	if *tracePath != "" {
 		var err error
-		if tr, err = startTrace(*tracePath, append([]string{"run"}, args...)); err != nil {
+		if tr, err = startTrace(*tracePath, append([]string{name}, args...)); err != nil {
 			return fail(err)
 		}
 		defer tr.close()
+		activeTrace = tr
+		defer func() { activeTrace = nil }()
 	}
+	if g != nil {
+		fmt.Fprintln(g.out, "PortalGuard")
+	}
+	g.emit("start", map[string]any{"command": name, "version": version})
 	// The VPN check comes before the root check on purpose: it is the more
 	// informative failure, and it is actionable without sudo.
 	if err := checkNoActiveVPN(ctx, *allowVPN); err != nil {
 		return fail(err)
 	}
-	if err := requireRoot("run"); err != nil {
+	if err := requireRoot(name); err != nil {
 		return fail(err)
 	}
 
@@ -656,6 +730,8 @@ flags:
 	if err != nil {
 		return fail(err)
 	}
+	// The login page as soon as a probe finds it. See portal.Prober.FirstPortal.
+	prober.FirstPortal = true
 
 	fw := backend.New()
 	if ok, why := fw.Available(ctx); !ok {
@@ -666,35 +742,92 @@ flags:
 	// while nothing of ours is loaded.
 	if !*noDNSFilter {
 		if cleared, err := clearLoopbackSkipForRun(ctx); err != nil {
-			logf("pf skips loopback and it could not be cleared, so the DNS filter will be off: %v", err)
+			note("pf skips loopback and it could not be cleared, so the DNS filter will be off: %v", err)
 		} else if cleared {
 			logf("pf was skipping loopback (a VPN kill switch or Internet Sharing leaves that behind); reset it so the DNS filter can run")
 		}
 	}
+
+	// A GUI drives a -json run through stdin: host names to open, and
+	// "cancel". Read from the start, so a cancel works while armed and
+	// waiting too, and so the app closing (stdin reaching its end) gives the
+	// network back rather than leave it locked with nothing in charge.
+	var prompt *allowPrompt
+	var appCancelled, appHeld atomic.Bool
+	fed := g != nil && g.feed != nil
 
 	// From here on the firewall may be engaged, so the safety net matters.
 	safety := firewall.InstallSafetyNet(fw, logf)
 	defer safety.Stop()
 
 	sess := state.NewSession(fw, prober, logf)
-	sess.Machine().Observe(func(t state.Transition) { logf("%s", t) })
+	sess.Machine().Observe(func(t state.Transition) {
+		logf("%s", t)
+		g.transition(t)
+	})
 	// Record every move, so `allow` from a second terminal can widen the gap
 	// this run is about to open while this one sits waiting for the login.
 	sess.PersistTo(state.SessionPath)
 	sess.UseKnownNetworks(state.KnownNetworksPath)
 
-	err = firewall.Guard(fw, logf, func() error {
-		res, err := sess.Detect(ctx)
-		if err != nil {
-			return err
+	if fed {
+		runCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		ctx = runCtx
+		prompt = newAllowPrompt(ctx, sess, os.Stdin, os.Stdout, g)
+		prompt.cancel = func(why string) {
+			if appCancelled.CompareAndSwap(false, true) {
+				g.emit("note", map[string]any{"text": why})
+				cancel()
+			}
 		}
-		if res.Class != portal.Portal {
-			logf("nothing to do (%s)", res.Class)
-			return nil
+		prompt.hold = func(why string) {
+			if appCancelled.CompareAndSwap(false, true) {
+				appHeld.Store(true)
+				g.emit("note", map[string]any{"text": why})
+				cancel()
+			}
 		}
+	}
 
-		if err := sess.Lockdown(ctx); err != nil {
-			return err
+	err = firewall.Guard(fw, logf, func() error {
+		var res portal.Result
+		if armed {
+			var released bool
+			res, released, err = armedDetect(ctx, sess, g, note, *next, *joinWait, &join)
+			if err != nil || released {
+				return err
+			}
+			if res.Class != portal.Portal {
+				// An open network, not trusted: the lockdown stands, and
+				// only the VPN may leave until its tunnel is up.
+				if *noHandoff {
+					g.stepf("Connect your VPN when you are ready")
+					g.sayf("Traffic stays blocked until then: sudo %s handoff, then connect it.", invokedAs())
+					if g == nil {
+						fmt.Printf("No portal. When you are ready: sudo %s handoff, then connect your VPN.\n", invokedAs())
+					}
+					return nil
+				}
+				endpoints, err := vpns.endpoints(state.SystemResolve(ctx))
+				if err != nil {
+					note("%v; handing over on the default VPN ports instead", err)
+					endpoints = state.DefaultVPNEndpoints()
+				}
+				return handOff(ctx, sess, endpoints, *handoffWait, g)
+			}
+		} else {
+			res, err = sess.Detect(ctx)
+			if err != nil {
+				return err
+			}
+			if res.Class != portal.Portal {
+				logf("nothing to do (%s)", res.Class)
+				return nil
+			}
+			if err := sess.Lockdown(ctx); err != nil {
+				return err
+			}
 		}
 		// Before the gap, so its rules carry the filter from the first load.
 		// Without it the gap still works, with the machine-wide DNS hole.
@@ -705,49 +838,75 @@ flags:
 		if tr != nil {
 			sess.UseDNSTrace(tr.dns)
 		}
+		if fed {
+			sess.UseOtherSiteHook(func(name, kind string) {
+				g.emit("refused", map[string]any{"name": name, "kind": kind})
+			})
+		}
 		if !*noDNSFilter {
 			if err := sess.StartDNSFilter(ctx); err != nil {
-				logf("dns filter off, so every app's lookups can reach the network during the gap: %v", err)
+				note("dns filter off, so every app's lookups can reach the network during the gap: %v", err)
 			}
 		}
 		if err := sess.OpenGap(ctx); err != nil {
 			// The lockdown is still standing; release it rather than
-			// leaving the user offline with no explanation.
-			_ = sess.Release(ctx)
+			// leaving the user offline with no explanation. Unless this is
+			// a cancel, which decides that itself.
+			if ctx.Err() == nil {
+				_ = sess.Release(ctx)
+			}
 			return err
 		}
 		// Only for hosts this site has been seen and verified on before -
 		// each one still has to complete a fresh TLS handshake before it is
 		// opened. See docs/gap-scope.md, option E.
-		if opened := sess.OpenKnown(ctx); len(opened) > 0 {
+		// (A guided run has already said so, as each one opened.)
+		if opened := sess.OpenKnown(ctx); len(opened) > 0 && g == nil {
 			fmt.Printf("Opened automatically (known network, TLS verified): %s\n", strings.Join(opened, ", "))
 		}
 
-		fmt.Printf("\nOpen this page and log in yourself:\n  %s\n\n", res.PortalURL)
-		fmt.Println("Everything else on this machine is blocked while you do.")
-		if err := openBrowser(res.PortalURL); err != nil {
-			logf("could not open a browser automatically: %v", err)
+		g.emit("login_url", map[string]any{"url": res.PortalURL})
+		if g != nil {
+			g.sayf("If it does not open by itself: %s", res.PortalURL)
+		} else {
+			fmt.Printf("\nOpen this page and log in yourself:\n  %s\n\n", res.PortalURL)
+			fmt.Println("Everything else on this machine is blocked while you do.")
 		}
-		fmt.Printf("Waiting up to %s for the login to go through...\n", *wait)
+		if err := openBrowser(res.PortalURL); err != nil {
+			note("could not open a browser automatically: %v", err)
+		}
+		g.emit("waiting", map[string]any{"for": "login", "timeout_seconds": wait.Seconds()})
+		if g != nil {
+			g.sayf("Waiting for you to finish (up to %s)...", *wait)
+		} else {
+			fmt.Printf("Waiting up to %s for the login to go through...\n", *wait)
+		}
 
 		// A portal host that is missing from the gap usually shows up as a
 		// blank page rather than as an error, so say what is being looked
 		// for and not reached while the gap is still open and the user can
 		// still act on it. This opens nothing: it prints the command, and
 		// the person decides whether to run it.
-		prompt := newAllowPrompt(ctx, sess, os.Stdin, os.Stdout)
+		if prompt == nil {
+			prompt = newAllowPrompt(ctx, sess, os.Stdin, os.Stdout, g)
+		}
 		if prompt != nil && *verbose {
 			fmt.Println("Refused names are listed as they happen. Type one and press Enter to open it.")
 		}
 		sess.OnSuggestion(func(names []string) {
-			printSuggestion(names)
+			g.emit("suggest", map[string]any{"names": names})
+			if g == nil || g.feed == nil {
+				printSuggestion(names)
+			}
 			prompt.offer(names)
 		})
 
 		waitCtx, cancel := context.WithTimeout(ctx, *wait)
 		defer cancel()
 		if err := sess.WaitForAuth(waitCtx, *poll); err != nil {
-			_ = sess.Release(ctx)
+			if ctx.Err() == nil {
+				_ = sess.Release(ctx)
+			}
 			var ne *state.NotEnforcedError
 			if errors.As(err, &ne) {
 				return fmt.Errorf("stopped: %v.\n"+
@@ -763,7 +922,7 @@ flags:
 		if !*noHandoff {
 			endpoints, err = vpns.endpoints(state.SystemResolve(ctx))
 			if err != nil {
-				logf("%v; handing over on the default VPN ports instead", err)
+				note("%v; handing over on the default VPN ports instead", err)
 				endpoints = state.DefaultVPNEndpoints()
 			}
 		}
@@ -771,18 +930,67 @@ flags:
 		if err := sess.Seal(ctx); err != nil {
 			return err
 		}
-		fmt.Println("\nAuthenticated and sealed. Traffic is still blocked.")
-
-		printReport(sess, *redact, *verbose, *auditLog)
+		if g != nil {
+			g.summary(sess)
+			writeAuditLog(sess, *auditLog)
+		} else {
+			fmt.Println("\nAuthenticated and sealed. Traffic is still blocked.")
+			printReport(sess, *redact, *verbose, *auditLog)
+		}
 
 		if *noHandoff {
+			g.emit("waiting", map[string]any{"for": "handoff"})
+			if g != nil {
+				g.stepf("Connect your VPN when you are ready")
+				g.sayf("Traffic stays blocked until then: sudo %s handoff, then connect it.", invokedAs())
+				return nil
+			}
 			fmt.Printf("When you are ready: sudo %s handoff, then connect your VPN.\n", invokedAs())
 			return nil
 		}
-		return handOff(ctx, sess, endpoints, *handoffWait)
+		return handOff(ctx, sess, endpoints, *handoffWait, g)
 	})
+	if appCancelled.Load() && appHeld.Load() {
+		// Cancelled from an app that rejoins the usual network itself:
+		// everything stays blocked until it has, and then it releases. A
+		// bare lockdown, so no hole the login opened outlives this run.
+		lctx, lcancel := context.WithTimeout(context.Background(), 10*time.Second)
+		lerr := fw.Lockdown(lctx)
+		lcancel()
+		if lerr != nil {
+			g.emit("error", map[string]any{"text": "cancelled, but locking down failed: " + lerr.Error()})
+			return fail(lerr)
+		}
+		logf("cancelled from the app; the lockdown stays until it releases")
+		g.emit("done", map[string]any{"state": sess.Machine().State(), "cancelled": true, "held": true})
+		return exitOK
+	}
+	if appCancelled.Load() {
+		// Cancelled from the app: an error on the way out is the cancel
+		// itself, and the network goes back whatever state it was in.
+		rctx, rcancel := context.WithTimeout(context.Background(), 10*time.Second)
+		rerr := sess.Release(rctx)
+		rcancel()
+		if rerr != nil {
+			g.emit("error", map[string]any{"text": "cancelled, but releasing failed: " + rerr.Error()})
+			return fail(rerr)
+		}
+		if join.ssid != "" && join.returnAfter {
+			lctx, lcancel := context.WithTimeout(context.Background(), 45*time.Second)
+			if lerr := netinfo.LeaveWiFi(lctx, join.ssid, !join.wasSaved, join.open); lerr != nil {
+				g.emit("note", map[string]any{"text": "could not leave " + join.ssid + ": " + lerr.Error()})
+			} else {
+				g.emit("note", map[string]any{"text": "left " + join.ssid + "; macOS is rejoining your usual network"})
+			}
+			lcancel()
+		}
+		g.emit("done", map[string]any{"state": sess.Machine().State(), "cancelled": true})
+		return exitOK
+	}
 	if err != nil {
+		g.emit("error", map[string]any{"text": hint(err).Error()})
 		return fail(hint(err))
 	}
+	g.emit("done", map[string]any{"state": sess.Machine().State()})
 	return exitOK
 }

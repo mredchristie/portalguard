@@ -24,6 +24,9 @@ const (
 	// NoNetwork means no probe got an answer at all: no link, no DHCP lease,
 	// or traffic being dropped rather than intercepted.
 	NoNetwork Classification = "NO_NETWORK"
+	// Skipped is a probe stopped before it answered, because another had
+	// already found the login page (Prober.FirstPortal). Never a verdict.
+	Skipped Classification = "SKIPPED"
 )
 
 // Result is the outcome of one detection run.
@@ -62,8 +65,11 @@ type Result struct {
 	DNS DNSCheck `json:"dns"`
 
 	Probes []ProbeResult `json:"probes"`
-	At     time.Time     `json:"at"`
-	Took   time.Duration `json:"took"`
+	// Stopped is set when detection ended at the first probe to find the
+	// login page (Prober.FirstPortal): the DNS check is then empty.
+	Stopped bool          `json:"stopped,omitempty"`
+	At      time.Time     `json:"at"`
+	Took    time.Duration `json:"took"`
 }
 
 // Summary renders a one-line human explanation of the verdict.

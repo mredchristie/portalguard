@@ -4,7 +4,7 @@ BIN_DIR  := bin
 VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS  := -X main.version=$(VERSION)
 
-.PHONY: fuzz all build install uninstall test vet fmt clean detect rescue e2e e2e-redact demo demo-allow testenv-up testenv-down testenv-logs hotspot-up hotspot-down hotspot-demo hotspot-known hotspot-auto hotspot-hostile preflight handoff-check dns-spike e2e-portal
+.PHONY: app fuzz all build install uninstall test vet fmt clean detect rescue e2e e2e-redact demo demo-allow testenv-up testenv-down testenv-logs hotspot-up hotspot-down hotspot-demo hotspot-known hotspot-auto hotspot-hostile hotspot-armed preflight handoff-check dns-spike e2e-portal
 
 all: vet test build
 
@@ -110,6 +110,23 @@ demo-allow: build
 	@echo "this needs root and CUTS THE NETWORK several times on purpose."
 	sudo ./testenv/demo-allow.sh
 
+# --- The app ---------------------------------------------------------------
+# gui/ is its own Go module (Wails), so the engine stays dependency-free. The
+# app carries the engine inside it, in Contents/Resources, and is signed
+# ad hoc: it runs on this Mac, and is not yet for handing to anyone else.
+APP := gui/build/bin/PortalGuard.app
+#
+# Wails signs the app itself, and that step fails when the files carry
+# extended attributes (a Documents folder synced to iCloud adds them). So a
+# failed build is accepted only if the app binary was built, and the bundle is
+# stripped of attributes and signed here instead, with the engine inside.
+app: build
+	cd gui && ($(HOME)/go/bin/wails build -clean || test -x build/bin/PortalGuard.app/Contents/MacOS/PortalGuard)
+	cp $(BIN_DIR)/portalguard $(APP)/Contents/Resources/portalguard
+	xattr -cr $(APP)
+	codesign --force --deep --sign - $(APP)
+	@echo "built $(APP)"
+
 # --- Fuzzing the parsers that read untrusted input -------------------------
 # Each target runs for FUZZTIME (default 30s). A crash is saved under the
 # package's testdata/fuzz and from then on runs with every `make test`.
@@ -158,6 +175,12 @@ hotspot-hostile: build
 	@echo "this needs root, CUTS THE NETWORK, and points DNS at the hotspot while it runs."
 	sudo ./testenv/hotspot-demo.sh hostile-known
 	sudo ./testenv/hotspot-demo.sh hostile
+
+# Armed: lock down first, then join the hotspot. Nothing but detection and the
+# login may reach its DNS during the join.
+hotspot-armed: build
+	@echo "this needs root, CUTS THE NETWORK, and points DNS at the hotspot while it runs."
+	sudo ./testenv/hotspot-demo.sh armed
 
 # Before a field test: unit tests, then every hotspot run back to back, with a
 # verdict per suite. Brings the hotspot up and takes it down again.

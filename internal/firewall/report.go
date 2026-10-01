@@ -322,12 +322,15 @@ func (r Report) Redact() Report {
 // ("Apple services") rather than falling all the way to "other", which is
 // where most of a real capture ends up if the specific buckets above them
 // only ever match a handful of textbook domains.
+// HostnameCategory is hostnameCategory, for callers outside the report.
+func HostnameCategory(host string) string { return hostnameCategory(host) }
+
 func hostnameCategory(host string) string {
 	h := strings.ToLower(host)
 	switch {
 	case containsAny(h, "imap", "smtp", "pop3", "mail.", "outlook.", "exchange."):
 		return "mail"
-	case containsAny(h, "icloud", "drive.google", "docs.google", "dropbox", "onedrive", "box.com"):
+	case containsAny(h, "icloud", "apple-cloudkit", "drive.google", "docs.google", "dropbox", "onedrive", "box.com"):
 		return "cloud sync/storage"
 	case containsAny(h, "push.apple", "courier.push", "gcm-http.googleapis", "fcm.googleapis", "push.services"):
 		return "push notifications"

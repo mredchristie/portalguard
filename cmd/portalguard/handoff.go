@@ -13,6 +13,7 @@ import (
 	"portalguard/internal/firewall"
 	"portalguard/internal/firewall/backend"
 	"portalguard/internal/state"
+	"portalguard/internal/vpn"
 )
 
 // ==== handing over to the VPN =============================================
@@ -31,6 +32,11 @@ const vpnFlagHelp = "a VPN server to let through during the handover, as host:po
 // an error that says to use an address instead.
 func (e endpointFlags) endpoints(resolve func(string) ([]net.IP, error)) ([]firewall.Endpoint, error) {
 	if len(e) == 0 {
+		// The chosen VPN's own server, when it can be known: tighter than
+		// the usual ports to anywhere.
+		if es, ok := chosenEndpoints(); ok {
+			return es, nil
+		}
 		return state.DefaultVPNEndpoints(), nil
 	}
 	var out []firewall.Endpoint
@@ -86,7 +92,7 @@ flags:
 	if err != nil {
 		return fail(err)
 	}
-	if err := handOff(ctx, sess, endpoints, *wait); err != nil {
+	if err := handOff(ctx, sess, endpoints, *wait, nil); err != nil {
 		return fail(err)
 	}
 	return exitOK
@@ -94,9 +100,27 @@ flags:
 
 // handOff runs the handover and says what happened. Shared by `handoff` and
 // by `run`, which hands over by itself once it has sealed.
-func handOff(ctx context.Context, sess *state.Session, endpoints []firewall.Endpoint, wait time.Duration) error {
-	fmt.Printf("\nConnect your VPN now. Until its tunnel is up, only VPN traffic can leave.\n")
-	fmt.Printf("Waiting up to %s for the tunnel...\n", wait)
+func handOff(ctx context.Context, sess *state.Session, endpoints []firewall.Endpoint, wait time.Duration, g *guide) error {
+	chosen, starting := chosenVPN(ctx)
+	g.emit("waiting", map[string]any{"for": "vpn", "starting": chosen.Name, "timeout_seconds": wait.Seconds()})
+	if starting {
+		id := chosen.ID
+		sess.UseVPNConnect(func(ctx context.Context) error { return vpn.Start(ctx, id) })
+	}
+	switch {
+	case g != nil && starting:
+		g.stepf("Starting your VPN (%s)", chosen.Name)
+		g.sayf("Until its tunnel is up, only VPN traffic can leave. Waiting up to %s...", wait)
+	case g != nil:
+		g.stepf("Connect your VPN now")
+		g.sayf("Until its tunnel is up, only VPN traffic can leave. Waiting up to %s...", wait)
+	case starting:
+		fmt.Printf("\nStarting %q. Until its tunnel is up, only VPN traffic can leave.\n", chosen.Name)
+		fmt.Printf("Waiting up to %s for the tunnel...\n", wait)
+	default:
+		fmt.Printf("\nConnect your VPN now. Until its tunnel is up, only VPN traffic can leave.\n")
+		fmt.Printf("Waiting up to %s for the tunnel...\n", wait)
+	}
 
 	res, err := sess.HandOff(ctx, endpoints, wait)
 	var ne *state.NotEnforcedError
@@ -114,6 +138,15 @@ func handOff(ctx context.Context, sess *state.Session, endpoints []firewall.Endp
 	}
 	// The rules are gone, so the session file describes nothing any more.
 	state.ClearSnapshot(state.SessionPath)
+	g.emit("vpn", map[string]any{"status": "up", "interface": res.Interface, "taken_over": res.TakenOver})
+	if g != nil {
+		g.sayf("Your VPN is up on %s.", res.Interface)
+		if res.TakenOver {
+			g.sayf("Its own firewall took over while it connected, and PortalGuard cleared its rules.")
+		}
+		fmt.Fprintln(g.out, "\nAll done. PortalGuard has stepped aside; your VPN has the connection.")
+		return nil
+	}
 	if res.TakenOver {
 		fmt.Printf("\nYour VPN is up on %s.\n", res.Interface)
 		fmt.Println("While it connected, its own firewall replaced portalguard's, so its kill switch,")

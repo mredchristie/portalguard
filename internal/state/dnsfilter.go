@@ -12,6 +12,7 @@ import (
 
 	"portalguard/internal/dnsfilter"
 	"portalguard/internal/firewall"
+	"portalguard/internal/netinfo"
 )
 
 // ==== filtering the gap's DNS =============================================
@@ -82,6 +83,7 @@ func (s *Session) StartDNSFilter(ctx context.Context) error {
 			names = append(names, host)
 		}
 	}
+	names = append(names, osCheckNames...)
 	if knownPath != "" {
 		if kn, ok := LoadKnownNetworks(knownPath)[siteOf(res.PortalHost)]; ok {
 			for _, spec := range kn.Hosts {
@@ -97,10 +99,30 @@ func (s *Session) StartDNSFilter(ctx context.Context) error {
 		Upstreams: upstreams,
 		Policy:    dnsfilter.NewPolicy(DNSAllowPath, names...),
 	}
+	// Still no default route (see scopedInterface): the filter's questions
+	// go out of the Wi-Fi interface itself.
+	if iface := s.boundInterface(); iface != "" {
+		srv.UpstreamControl = netinfo.BindTo(iface)
+	}
 	if verbose {
 		srv.Logf = s.logf
 	}
 	srv.Trace = trace
+	s.mu.Lock()
+	onOther := s.otherSite
+	s.mu.Unlock()
+	if onOther != nil {
+		site := siteOf(res.PortalHost)
+		srv.OnRefused = func(name string) {
+			// The portal's own site is auto-allow's, or the suggestion's.
+			if site != "" && sameSite(name, site) {
+				return
+			}
+			if kind := OtherSiteKind(name); kind != "" {
+				onOther(name, kind)
+			}
+		}
+	}
 	var auto *autoAllow
 	site := autoAllowSite(res.PortalHost)
 	if autoOn && site != "" {
@@ -133,6 +155,15 @@ func (s *Session) StartDNSFilter(ctx context.Context) error {
 func (s *Session) UseVerboseDNS(on bool) {
 	s.mu.Lock()
 	s.dnsVerbose = on
+	s.mu.Unlock()
+}
+
+// UseOtherSiteHook has the login's filter report refused names on other
+// sites that may be what the page is waiting for (a card processor, say), and
+// not background noise. Takes effect at StartDNSFilter. See OtherSiteKind.
+func (s *Session) UseOtherSiteHook(f func(name, kind string)) {
+	s.mu.Lock()
+	s.otherSite = f
 	s.mu.Unlock()
 }
 
@@ -187,6 +218,18 @@ func (s *Session) allowDNSName(host string) {
 	// Written whether or not a filter is running: with none, nothing reads
 	// it, and the next StartDNSFilter clears it.
 	_ = dnsfilter.AppendAllowFile(DNSAllowPath, host)
+}
+
+// filterResolver asks the DNS filter directly, on loopback, rather than
+// through the system resolver.
+func filterResolver() *net.Resolver {
+	d := net.Dialer{Timeout: time.Second}
+	return &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return d.DialContext(ctx, network, fmt.Sprintf("127.0.0.1:%d", dnsfilter.ListenPort))
+		},
+	}
 }
 
 // resolveViaFilter resolves host by asking the DNS filter directly, and falls

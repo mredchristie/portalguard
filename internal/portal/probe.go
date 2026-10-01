@@ -12,6 +12,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 	"unicode/utf8"
 )
@@ -84,6 +86,20 @@ type Prober struct {
 	// SkipDNSCheck disables the resolver-integrity checks, which cost one
 	// extra lookup.
 	SkipDNSCheck bool
+	// OnPortal, if set, is told the login host as soon as the probes name
+	// it, before it is resolved and pinned. Detection through a lockdown
+	// uses it to let exactly that lookup through its filter.
+	OnPortal func(host string)
+	// FirstPortal ends detection as soon as one probe names a login page,
+	// rather than waiting for every probe and the DNS check: a portal found
+	// is a portal whatever the rest say, and one slow check (5 seconds, its
+	// timeout, at EE WiFi) held the login page back. What the rest would
+	// have added is only for the report, so `detect` leaves it off.
+	FirstPortal bool
+	// Control, if set, is applied to every connection the probes make: how
+	// detection binds them to the Wi-Fi interface when macOS has joined a
+	// network but not yet given it a default route.
+	Control func(network, address string, c syscall.RawConn) error
 }
 
 // NewProber returns a Prober with sensible defaults.
@@ -131,18 +147,56 @@ func (p *Prober) Detect(ctx context.Context) Result {
 		probes = DefaultProbes()
 	}
 
-	res := Result{At: start, Probes: make([]ProbeResult, 0, len(probes))}
-	for _, pr := range probes {
-		res.Probes = append(res.Probes, p.runProbe(ctx, pr))
+	// All at once: each can wait out its own timeout on a slow network, and
+	// one after another they added up (9.7 seconds at EE WiFi, where 0.9 was
+	// usual). Results keep the probe list's order, so classification is
+	// exactly as before.
+	res := Result{At: start, Probes: make([]ProbeResult, len(probes))}
+	checkCtx, stop := context.WithCancel(ctx)
+	defer stop()
+	var found sync.Once
+	var wg sync.WaitGroup
+	for i, pr := range probes {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r := p.runProbe(checkCtx, pr)
+			res.Probes[i] = r
+			if p.FirstPortal && r.Class == Portal && r.PortalURL != "" {
+				found.Do(stop)
+			}
+		}()
 	}
-
 	if !p.SkipDNSCheck {
-		res.DNS = p.checkDNS(ctx, probes)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			began := time.Now()
+			res.DNS = p.checkDNS(checkCtx, probes)
+			res.DNS.Elapsed = time.Since(began)
+		}()
+	}
+	wg.Wait()
+	if ctx.Err() == nil && checkCtx.Err() != nil {
+		// Stopped early: say so, rather than let the stopped ones read as
+		// failures in the report.
+		for i := range res.Probes {
+			if r := &res.Probes[i]; r.Class != Portal && strings.Contains(r.Err, context.Canceled.Error()) {
+				r.Class, r.Reason, r.Err = Skipped, "not needed: another probe found the login page", ""
+			}
+		}
+		res.DNS = DNSCheck{}
+		res.Stopped = true
 	}
 
 	p.classify(&res)
 
 	if res.Class == Portal && res.PortalURL != "" {
+		if p.OnPortal != nil {
+			if host, _, ok := splitURL(res.PortalURL); ok {
+				p.OnPortal(host)
+			}
+		}
 		p.pinPortal(ctx, &res)
 	}
 	res.Took = time.Since(start)
@@ -294,7 +348,7 @@ func (p *Prober) runProbe(ctx context.Context, probe Probe) ProbeResult {
 // and redirects surfaced rather than followed, because the redirect target is
 // exactly what we are looking for.
 func (p *Prober) client() *http.Client {
-	dialer := &net.Dialer{Timeout: p.timeout(), Resolver: p.resolver()}
+	dialer := &net.Dialer{Timeout: p.timeout(), Resolver: p.resolver(), Control: p.Control}
 	return &http.Client{
 		Timeout: p.timeout(),
 		CheckRedirect: func(*http.Request, []*http.Request) error {

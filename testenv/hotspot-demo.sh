@@ -11,6 +11,7 @@
 #   sudo ./testenv/hotspot-demo.sh hostile        # a portal that attacks: malformed page,
 #                                                 # too many hosts, a disguised DNS name
 #   sudo ./testenv/hotspot-demo.sh hostile-known  # DNS lies about remembered hosts
+#   sudo ./testenv/hotspot-demo.sh armed    # arm first, then join: the join burst goes nowhere
 #
 # first and known run with -no-auto-allow: they prove the paths auto-allow
 # falls back to, which it would otherwise hide.
@@ -43,13 +44,18 @@ WAIT=60s
 RUN_FLAGS=""
 [ "${DNS_FILTER:-on}" = off ] && RUN_FLAGS="-no-dns-filter"
 case "$ACT" in
-    auto | hostile) ;;
+    auto | hostile | armed) ;;
     *) RUN_FLAGS="$RUN_FLAGS -no-auto-allow" ;;
 esac
 # run always writes a trace: it is how the verdict knows the run really went
 # from lockdown to SEALED. TRACE=file keeps it somewhere of your choosing.
 RUNTRACE=${TRACE:-$(mktemp -t portalguard-demo-trace)}
 RUN_FLAGS="$RUN_FLAGS -trace $RUNTRACE"
+# JSON=1 runs with -json: the progress feed a GUI reads, instead of text.
+[ -n "${JSON:-}" ] && RUN_FLAGS="$RUN_FLAGS -json"
+# armed locks down first, on the home network, and waits for the next one.
+RUNCMD=run
+[ "$ACT" = armed ] && RUNCMD="arm -next -join-wait 60s"
 [ "$MODE" = human ] && WAIT=180s
 BIN=${BIN:-./bin/portalguard}
 DOMAIN=${DOMAIN:-guestwifi.test}
@@ -113,6 +119,11 @@ if data.get("networks", {}).pop(sys.argv[1], None) is not None:
         f.write("\n")
 PY
 fi
+if [ "$ACT" = armed ]; then
+    # The log starts now, while this Mac is still on the home network: from
+    # here, every name the hotspot hears was asked during or after the join.
+    curl -s -m 2 -o /dev/null -X POST "http://$WWW:8443/dnsmark"
+else
 ./testenv/hotspot.sh dns-on >/dev/null
 grep -q "nameserver $WWW" /etc/resolv.conf || { echo "DNS did not take (is a VPN still connected?)"; exit 1; }
 
@@ -131,6 +142,7 @@ for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
     sleep 1
 done
 [ -n "$seen" ] || { echo "this Mac does not see the hotspot's portal (detect exit $rc), so there is nothing to test"; exit 1; }
+fi
 
 banner() { printf '\n=== %s ===\n' "$1"; }
 
@@ -317,19 +329,56 @@ hostile_known_visit() {
     banner "back to the first terminal"
 }
 
+armed_visit() {
+    # Armed first: pf holds a bare lockdown while DNS still points at home.
+    i=0
+    locked=no
+    while [ $i -lt 30 ]; do
+        if "$BIN" status 2>/dev/null | grep -q '^phase *: LOCKED'; then
+            locked=yes
+            break
+        fi
+        sleep 1
+        i=$((i + 1))
+    done
+    check "locked down before joining the network" "$locked" yes
+    [ "$locked" = yes ] || return 0
+    sleep 3
+    banner "joining the hotspot"
+    ./testenv/hotspot.sh dns-on >/dev/null
+    # Detection opens a brief gap of its own (probe lookups only), so wait
+    # for the login's gap, which the run's trace names.
+    i=0
+    while [ $i -lt 45 ] && ! grep -q -- '--OPEN_GAP--> GAP_OPEN' "$RUNTRACE" 2>/dev/null; do
+        sleep 1
+        i=$((i + 1))
+    done
+    sleep 3
+    banner "browser: loading the login page"
+    page=$(fetch "http://www.$DOMAIN:8443/login")
+    js=$(fetch "http://cdn.$DOMAIN/site.js")
+    echo "page: $page, site.js: $js"
+    check "login page reachable after an armed join" "$page" loaded
+    check "auto-allow works after an armed join" "$js" loaded
+    result=$(login)
+    check "login completes after an armed join" "$result" "logged in"
+    banner "back to the first terminal"
+}
+
 case "$ACT" in
     first) first_visit & ;;
     known) known_visit & ;;
     auto) auto_visit & ;;
     hostile) hostile_visit & ;;
     hostile-known) hostile_known_visit & ;;
-    *) echo "usage: $0 [first|known|auto|hostile|hostile-known] [auto|human]"; exit 64 ;;
+    armed) armed_visit & ;;
+    *) echo "usage: $0 [first|known|auto|hostile|hostile-known|armed] [auto|human]"; exit 64 ;;
 esac
 BROWSER=$!
 
 status=0
 # shellcheck disable=SC2086
-"$BIN" run -no-handoff $RUN_FLAGS -wait "$WAIT" -poll 2s -redact || status=$?
+"$BIN" $RUNCMD -no-handoff $RUN_FLAGS -wait "$WAIT" -poll 2s -redact || status=$?
 # If run gave up early the browser has nothing left to test against.
 kill "$BROWSER" 2>/dev/null || true
 wait "$BROWSER" 2>/dev/null || true
@@ -349,6 +398,10 @@ case "$ACT" in
         echo "hosts opened automatically: $autos"
         check "auto-allow stopped at its cap of 10" "$(yn [ "$autos" -le 10 ])" yes
         check "and said so" "$(yn grep -q 'anything more has to be allowed by hand' "$RUNTRACE")" yes
+        ;;
+    armed)
+        check "detection happened through the lockdown" \
+            "$(yn grep -q 'detecting through the lockdown' "$RUNTRACE")" yes
         ;;
     hostile-known)
         check "the impostor's certificate was rejected" "$(yn grep -q 'did not verify' "$RUNTRACE")" yes
@@ -384,9 +437,20 @@ login = {"www.guestwifi.test", "cdn.guestwifi.test", "reg.guestwifi.test",
          "captive.apple.com", "connectivitycheck.gstatic.com"}
 # Hosts auto-allow opened are the login too, and only those: the trace says
 # which. A host it refused must not appear under any record type.
+import re
 opened = set(sys.argv[1].split())
+own = login | opened
+# A browser asks for the HTTPS record of a site on a non-default port as
+# _8443._https.<host>. For the login page, or a host auto-allow opened, that
+# is the page itself being loaded, not another app.
+port_prefixed = re.compile(r"^_[0-9]+\._https\.(.+)$")
+# The DNS hijack check asks for a name that cannot exist, made up per run.
+hijack_check = re.compile(r"^pg-[0-9a-f.]+\.portalguard\.invalid$")
+def ours(n):
+    m = port_prefixed.match(n)
+    return n in own or (m is not None and m.group(1) in own) or hijack_check.match(n) is not None
 names = json.load(sys.stdin) or []  # an older hotspot says null for none
-print(" ".join(sorted(n for n in names if n not in login and n not in opened)) or "none")
+print(" ".join(sorted(n for n in names if not ours(n))) or "none")
 ' "$opened" 2>/dev/null || echo "unreadable")
 echo "DNS that reached the network during the gap, beyond the login's own names: $leaked"
 check "no other app's DNS left the machine during the gap" "$leaked" none

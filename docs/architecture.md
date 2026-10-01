@@ -223,19 +223,43 @@ Verified on real hardware, and re-verified by `testenv/e2e.sh`:
 | Auto-allow stops at 10 hosts, and nothing past the cap reaches the network | `hotspot-demo.sh hostile`: 15 more hosts asked for, 10 opened, the rest refused under every record type (the first run found their AAAA and HTTPS lookups leaking, now fixed) |
 | A DNS name disguised as an allowed one is refused | `hotspot-demo.sh hostile`: one label spelling `cdn.guestwifi.test` got REFUSED |
 | The parsers of untrusted input do not crash | `make fuzz`: six fuzz targets over DNS queries and replies, portal pages, redirect URLs and the site matcher; the four bugs they found are saved as regression inputs |
+| pf redirects IPv6 DNS as well as IPv4 | `make dns-spike` on a network listing an IPv6 resolver: direct lookups to it over UDP and TCP both diverted |
+| Armed: nothing leaks while a network is joined | `hotspot-demo.sh armed`: locked down on the home network, then joined the hotspot; detection went through the lockdown, 524 packets of join burst were held back, and the hotspot's resolver heard only detection and the login |
+| The handover can start the VPN itself, through a hole one server wide | Live: `vpn use` a WireGuard tunnel, then `lockdown` and `handoff`: the hole was pinned to its server (`203.0.113.10:51820/udp`, read from macOS's own VPN settings), the tunnel was started by portalguard, came up on utun4, and the rules were released |
+| Armed mode, joining, detection through the lockdown and auto-allow hold on a real paid network | EE WiFi, from the terminal and from the app: portal found under 1 second after the join, CDN opened by itself, about 55 background names refused; the browser on the login page 4 to 5 seconds after pressing Arm |
 | A stale session file cannot claim a gap the ruleset denies | Unit tests over every phase/snapshot pairing |
 | Detection survives a real portal | BT Wi-Fi, live: portal found, host pinned, non-standard port carried through, clean release |
+
+## Armed mode
+
+`arm` reverses `run`'s order: lock down, then detect. Detection through the
+lockdown runs the DNS filter in probe mode (the probe names, the hijack
+check's made-up `.invalid` name, and the login host once the probes name it;
+nothing else), opens each probe answer as a check hole on 80 and 443 so the
+probe can connect, and pins the login host without opening it. The ruleset
+then goes back to a bare lockdown before the login's own gap, so no
+detection hole carries over. The state machine has one new state, `ARMED`,
+engaged like a lockdown: from it, detection leads only to `LOCKED_DOWN`.
+
+A lockdown while already engaged keeps the running account, so the report
+counts what the join burst tried to send. What armed detection does not do
+is follow the portal's redirect chain: that needs connections to the portal,
+which the lockdown refuses until the gap. A chain on the portal's own site is
+caught by auto-allow; one elsewhere falls back to the suggestion.
+
+Trusted networks are recognised by the gateway's hardware address, and trust
+is acted on only when detection also finds open internet: a trusted router
+with a login page in front of it is treated as a stranger.
 
 ## What is not proven
 
 This section is the reason the document exists.
 
-**Auto-allow has not met a real portal.** Every run so far is the hotspot,
-whose login hosts sit neatly under one domain. A real portal may send its
-login through a CDN on another domain, a payment provider, or a host whose
-site `siteOf` gets wrong. Each of those falls back to the suggestion rather
-than failing open, which is proven by unit tests; how often it happens on
-real networks is not known yet.
+**Auto-allow has met one real portal, not its payment step.** At EE WiFi
+it opened the portal's CDN by itself and the page rendered first time; the
+payment step, which may need a host on another site, is not yet seen. A host
+on another site falls back to the suggestion rather than failing open,
+which is proven by unit tests; how often real portals need one is not known.
 
 **The end-to-end test uses a gateway split.** A container runtime on macOS
 cannot give a portal that is off-box from the Mac: published ports are bound by
@@ -280,7 +304,9 @@ presenting the demo should not claim it shows the gap working.
 - The DNS filter against a real portal. It is proven against the off-box
   hotspot; a real network adds resolvers that behave differently, and portals
   whose pages load third-party names that will be refused until allowed. It
-  also runs only inside `run`, and does not cover IPv6 resolvers.
+  also runs only inside `run`. Lookups sent to an IPv6 resolver are caught
+  and filtered (proven by `make dns-spike`), but what it lets out goes over
+  IPv4, so an IPv6-only network gets no filter.
 - DHCP lease expiry mid-lockdown, IPv6-only networks, and roaming between
   networks while engaged.
 - Linux and Windows. The packages exist with their designs recorded in the

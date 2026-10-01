@@ -171,3 +171,35 @@ func clearLoopbackSkipForRun(ctx context.Context) (bool, error) {
 	}
 	return true, pf.ClearLoopbackSkip(ctx)
 }
+
+// pfFindings is doctor's look at the firewall. The anchor file is readable by
+// anyone; the loaded ruleset needs root.
+func pfFindings(ctx context.Context, root bool) []finding {
+	installed, err := pf.AnchorInstalled()
+	switch {
+	case err != nil:
+		return []finding{{"fail", "could not read " + pf.PfConfPath, err.Error()}}
+	case !installed:
+		return []finding{{"fail", "the portalguard anchor is not in " + pf.PfConfPath,
+			fmt.Sprintf("once per machine, and again after a macOS update: sudo %s install-anchor", invokedAs())}}
+	}
+	out := []finding{{"ok", "the portalguard anchor is in " + pf.PfConfPath, ""}}
+	if !root {
+		return out
+	}
+	if !pf.HooksLoaded(ctx) {
+		out = append(out, finding{"fail", "pf is not loading the portalguard anchor",
+			fmt.Sprintf("something replaced pf's rules (a VPN kill switch, usually): sudo %s install-anchor", invokedAs())})
+	} else {
+		out = append(out, finding{"ok", "pf is loading the portalguard anchor", ""})
+	}
+	if pf.LoopbackSkipped(ctx) {
+		out = append(out, finding{"warn", "pf is skipping loopback (set skip on lo0)",
+			fmt.Sprintf("the DNS filter cannot run like this. run clears it itself; to clear it now: sudo %s install-anchor", invokedAs())})
+	}
+	if st, err := pf.New().Status(ctx); err == nil && st.Managed {
+		out = append(out, finding{"warn", fmt.Sprintf("portalguard's rules are loaded (%s)", st.Phase),
+			fmt.Sprintf("a run is going, or one was killed hard. If nothing is running: sudo %s release", invokedAs())})
+	}
+	return out
+}

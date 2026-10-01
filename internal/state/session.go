@@ -14,6 +14,7 @@ import (
 
 	"portalguard/internal/dnsfilter"
 	"portalguard/internal/firewall"
+	"portalguard/internal/netinfo"
 	"portalguard/internal/portal"
 )
 
@@ -65,8 +66,20 @@ type Session struct {
 	// so a login stuck on another domain (a payment page) can be spotted
 	// while it is happening. See UseVerboseDNS.
 	dnsVerbose bool
+	// otherSite is told about refused names on other sites worth offering to
+	// open. See UseOtherSiteHook.
+	otherSite func(name, kind string)
 	// dnsTrace is told about every query the filter answers. See UseDNSTrace.
 	dnsTrace func(name, qtype, verdict string)
+
+	// vpnConnect, if set, starts the user's VPN once the handover's hole is
+	// open. See UseVPNConnect.
+	vpnConnect func(context.Context) error
+
+	// bindIface is the interface detection bound its connections to, when the
+	// network had no default route yet; the login's DNS filter does the
+	// same. Empty otherwise. See armed.go, scopedInterface.
+	bindIface string
 
 	// gapMu is held across AllowExtra's check-and-open and across Seal and
 	// Release, so a host added from inside this process (the prompt) can
@@ -326,6 +339,27 @@ func (s *Session) Result() portal.Result {
 // ==== the flow, in order ==================================================
 // Detect, lock down, open the gap, wait for login, seal, hand off.
 
+// logDetection notes how long each check took, so a slow one shows in the
+// trace: at EE WiFi one ran to its 5 second timeout, and nothing said which.
+func (s *Session) logDetection(res portal.Result) {
+	for _, pr := range res.Probes {
+		why := pr.Reason
+		if pr.Err != "" {
+			why = pr.Err
+		}
+		s.logf("detection: probe %s: %s in %s (%s)", pr.Probe.Name, pr.Class, pr.Elapsed.Round(10*time.Millisecond), why)
+	}
+	if res.DNS.Checked {
+		s.logf("detection: DNS check: hijacked=%v in %s", res.DNS.Hijacked, res.DNS.Elapsed.Round(10*time.Millisecond))
+	}
+	switch {
+	case res.Stopped:
+		s.logf("detection: %s, stopped at the first probe to find the login page", res.Took.Round(10*time.Millisecond))
+	default:
+		s.logf("detection: %s", res.Took.Round(10*time.Millisecond))
+	}
+}
+
 // Detect runs the probes and moves the machine to PortalFound or back to Idle.
 func (s *Session) Detect(ctx context.Context) (portal.Result, error) {
 	if _, err := s.machine.Apply(EventDetect, ""); err != nil {
@@ -333,6 +367,7 @@ func (s *Session) Detect(ctx context.Context) (portal.Result, error) {
 	}
 
 	res := s.prober.Detect(ctx)
+	s.logDetection(res)
 	// Follow the portal's redirects now, while the network is open. Only
 	// here: the re-probe during the gap reuses Detect, and must not.
 	s.prober.FollowChain(ctx, &res)
@@ -634,7 +669,22 @@ func splitHostPort(spec string) (host string, port int) {
 // the user on, which is the only signal we trust: we never read the portal's
 // own "you are logged in" page.
 func (s *Session) CheckAuth(ctx context.Context) (bool, error) {
-	res := s.prober.Detect(ctx)
+	// The DNS tampering check has done its job once the portal is known: on
+	// every re-check it only adds a made-up name for the filter to refuse.
+	p := *s.prober
+	p.SkipDNSCheck = true
+	// Before macOS makes the network primary, the re-probe too has to leave
+	// by the Wi-Fi interface, and ask the filter (if there is one) directly.
+	if iface := s.boundInterface(); iface != "" {
+		p.Control = netinfo.BindTo(iface)
+		s.mu.Lock()
+		filtering := s.dns != nil
+		s.mu.Unlock()
+		if filtering {
+			p.Resolver = filterResolver()
+		}
+	}
+	res := p.Detect(ctx)
 	s.mu.Lock()
 	s.last = res
 	s.mu.Unlock()
@@ -887,7 +937,29 @@ func parseIPs(ss []string) []net.IP {
 // keeps it in step with the primary service's DNS. It misses per-interface
 // resolvers that only scutil knows about, which is a gap worth closing before
 // v1 - a split-DNS setup could leave the portal's resolver out of the gap.
+// SystemResolvers is the machine's DNS servers, from /etc/resolv.conf: the
+// network's resolvers, which the DNS filter forwards to.
+func SystemResolvers() []net.IP { return systemResolvers() }
+
+// systemResolvers reads /etc/resolv.conf, and when that is empty, macOS's
+// live settings: a network joined but not yet made primary (macOS holds it
+// back while it checks for a login page) has its resolver there and nowhere
+// else. The first EE WiFi run waited 41 seconds on an empty resolv.conf.
 func systemResolvers() []net.IP {
+	if rs := resolvConf(); len(rs) > 0 {
+		return rs
+	}
+	var out []net.IP
+	for _, r := range scopedDNS(context.Background()) {
+		out = append(out, r.Addr)
+	}
+	return out
+}
+
+// scopedDNS is netinfo.ScopedDNS, swappable in tests.
+var scopedDNS = netinfo.ScopedDNS
+
+func resolvConf() []net.IP {
 	f, err := os.Open("/etc/resolv.conf")
 	if err != nil {
 		return nil

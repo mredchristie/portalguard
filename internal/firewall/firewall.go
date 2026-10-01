@@ -170,6 +170,16 @@ type DNSFilterer interface {
 	UseDNSFilter(ctx context.Context) error
 }
 
+// SelfDNSFilterer is a DNSFilterer that can also filter DNS for Portalguard's
+// own lookups alone, where catching other apps' is impossible (pf skipping
+// loopback): the filter's upstream rule still lets its own questions out, and
+// everything else sent to the resolvers still goes nowhere. Enough for
+// detection, which needs only its own lookups; not for a login, whose browser
+// needs its lookups answered.
+type SelfDNSFilterer interface {
+	UseDNSFilterForSelf(ctx context.Context) error
+}
+
 // ==== handing over to the VPN =============================================
 // Between sealing and the tunnel coming up, only the VPN's own handshake may
 // leave. Releasing first, as v0.1 did, leaks everything in between.

@@ -41,6 +41,7 @@ func commands() []command {
 	return []command{
 		{"detect", "probe the current network and classify it", runDetect},
 		{"check", "one HTTP request; prints internet: reachable or blocked", runCheck},
+		{"doctor", "is this Mac ready to run? read-only; more with sudo", runDoctor},
 		{"status", "show the firewall and state machine status", runStatus},
 		{"lockdown", "block all traffic (root)", runLockdown},
 		{"allow", "open the gap for the detected portal, or widen an open one (root)", runAllow},
@@ -49,6 +50,14 @@ func commands() []command {
 		{"handoff", "hold the lockdown, let only your VPN out, step aside once its tunnel is up (root)", runHandoff},
 		{"release", "tear down all portalguard rules and restore networking (root)", runRelease},
 		{"run", "the whole flow: detect, lock down, open the gap, wait, seal (root)", runFlow},
+		{"arm", "like run, but lock down first and then join the network (root)", runArm},
+		{"trust", "mark the network you are on as yours: arm stands down there (root)", runTrust},
+		{"untrust", "stop trusting it (root)", runUntrust},
+		{"vpn", "list VPNs, or choose one for the handover to start by itself", runVPN},
+		{"leave", "leave a Wi-Fi network PortalGuard joined, back to the usual one (root)", runLeave},
+		{"install-helper", "run as root in the background, so no command asks for a password again (root, once)", runInstallHelper},
+		{"uninstall-helper", "remove that again (root)", runUninstallHelper},
+		{"helper", "the background helper itself; started by launchd, not by hand", runHelper},
 		{"print-rules", "print the pf ruleset without loading it", runPrintRules},
 		{"install-anchor", "add the portalguard anchor point to /etc/pf.conf (root, once)", runInstallAnchor},
 		{"uninstall-anchor", "remove it again (root)", runUninstallAnchor},
@@ -81,6 +90,11 @@ func run() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Without root, a command that needs it goes to the helper, if one is
+	// installed: no password, no sudo. See helpercmd.go.
+	if viaHelper(args) {
+		return forwardToHelper(args)
+	}
 	for _, c := range commands() {
 		if c.name == name {
 			return c.run(ctx, args[1:])

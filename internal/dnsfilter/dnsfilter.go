@@ -26,6 +26,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -147,10 +148,15 @@ type Server struct {
 	Policy    *Policy
 	// Logf, if set, is told about each refusal the first time a name is seen.
 	Logf func(format string, args ...any)
+	// OnRefused, if set, is told each name the first time it is refused.
+	OnRefused func(name string)
 	// Trace, if set, is told about every query and what became of it:
 	// "forwarded", "auto" (forwarded and opened), "refused" or "servfail".
 	// For reviewing a real network afterwards; Logf only sees first refusals.
 	Trace func(name, qtype, verdict string)
+	// UpstreamControl, if set, is applied to the upstream sockets: binding
+	// them to the Wi-Fi interface when the network has no default route yet.
+	UpstreamControl func(network, address string, c syscall.RawConn) error
 	// Auto, if set, is asked about names the policy does not list, and can
 	// have them forwarded and opened as they are asked for. See AutoAllower.
 	Auto AutoAllower
@@ -219,8 +225,13 @@ func (s *Server) Start() error {
 	s.forwarded = map[string]int{}
 	s.auto = map[string]int{}
 
-	s.upstream4, _ = net.ListenUDP("udp4", &net.UDPAddr{Port: port})
-	s.upstream6, _ = net.ListenUDP("udp6", &net.UDPAddr{IP: net.IPv6unspecified, Port: port})
+	lc := net.ListenConfig{Control: s.UpstreamControl}
+	if pc, err := lc.ListenPacket(context.Background(), "udp4", fmt.Sprintf(":%d", port)); err == nil {
+		s.upstream4 = pc.(*net.UDPConn)
+	}
+	if pc, err := lc.ListenPacket(context.Background(), "udp6", fmt.Sprintf("[::]:%d", port)); err == nil {
+		s.upstream6 = pc.(*net.UDPConn)
+	}
 	if s.upstream4 == nil && s.upstream6 == nil {
 		return fmt.Errorf("dnsfilter: no upstream socket on port %d", port)
 	}
@@ -413,6 +424,9 @@ func (s *Server) decide(q []byte, name string) ([]byte, string) {
 		s.mu.Unlock()
 		if first && s.Logf != nil {
 			s.Logf("dns filter: refused %s", name)
+		}
+		if first && s.OnRefused != nil {
+			s.OnRefused(name)
 		}
 		return refusal(q), "refused"
 	}

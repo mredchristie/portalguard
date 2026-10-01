@@ -30,7 +30,8 @@ sudo ./bin/portalguard install-anchor    # once per machine; adds two lines to /
 sudo ./bin/portalguard run              # the whole flow
 ```
 
-`run` opens the login page in your browser and waits. Hosts on the portal's
+`run` talks you through it in plain numbered steps (`-verbose` shows the
+technical log instead), opens the login page in your browser, and waits. Hosts on the portal's
 own site (`cdn.btwifi.com` for `www.btwifi.com`) open as the page asks for
 them, so it renders first time.
 
@@ -43,14 +44,36 @@ host passes a fresh TLS certificate check.
 
 `sudo make install` puts the binary on your PATH as `portalguard`.
 
+**Better still: arm before you join.** Everything leaks in the first seconds
+after a Mac joins a network, before you could type anything. `sudo
+portalguard arm`, then join the Wi-Fi: the lockdown is already there, it
+detects the portal through it, and carries on as `run` does. On an open
+network it goes straight to VPN-only, and on one you have marked with
+`portalguard trust` it stands down.
+
+## The app
+
+`make app` builds `gui/build/bin/PortalGuard.app`: a window with one Arm
+button that runs the same engine and shows its progress as it happens. It
+asks for your Mac password each time you arm, so nothing is installed on the
+system, and closing it always gives the network back. It reads the engine's
+progress feed ([`docs/feed.md`](docs/feed.md)) and never touches the
+firewall itself. Each run's trace is kept in `~/Library/Logs/PortalGuard/`.
+It is signed for this Mac only, not yet for handing to anyone else.
+
 ## Commands
 
 | Command | Root | What it does |
 | --- | --- | --- |
 | `detect` | | Classify the network. Changes nothing. Exit code 0 open, 10 portal, 20 no network. |
 | `check` | | One request: prints `internet: reachable` or `blocked`. |
+| `doctor` | | Is this Mac ready to run? Read-only; checks the firewall too with sudo. |
 | `status` | yes | What pf is actually enforcing, and whether it is still in force. |
 | `run` | yes | The whole flow, from detection to handover. |
+| `arm` | yes | Like `run`, but locks down first: arm, then join the Wi-Fi, and nothing leaks while it connects. |
+| `trust [label]` | yes | Mark the network you are on as yours: `arm` stands down there. `-list` to see them. |
+| `untrust` | yes | Stop trusting it. |
+| `vpn list` / `vpn use <name>` | `use`: yes | Choose a VPN for the handover to start by itself (any in macOS's own VPN settings, WireGuard's included). |
 | `lockdown` | yes | Block everything. |
 | `allow [host[:port]...]` | yes | Open the gap, or widen it for named hosts. |
 | `remember` | yes | Save the hosts you allowed, for next time. |
@@ -125,6 +148,7 @@ make preflight     # every hotspot run back to back, before a field test
 | [`pf-design.md`](docs/pf-design.md) | Every firewall rule, the DNS filter, the handover, living with VPNs |
 | [`gap-scope.md`](docs/gap-scope.md) | How wide the gap should be, and why that is the hard part |
 | [`field-notes.md`](docs/field-notes.md) | The BT Wi-Fi trips, and reproducing the leak at home |
+| [`feed.md`](docs/feed.md) | `-json`: the progress feed a GUI reads |
 | [`demo.md`](docs/demo.md) | Capturing the leak yourself, and redacting it |
 | [`testenv/README.md`](testenv/README.md) | The test portals and how each test works |
 

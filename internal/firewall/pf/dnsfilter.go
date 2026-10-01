@@ -40,6 +40,20 @@ func (b *Backend) UseDNSFilter(ctx context.Context) error {
 
 var _ firewall.DNSFilterer = (*Backend)(nil)
 
+// UseDNSFilterForSelf renders the filter's rules without asking whether pf
+// can redirect other apps' DNS to it. With loopback skipped, it cannot: their
+// queries are routed to lo0 and die there, unanswered and unleaked. The
+// filter's own upstream queries, from its fixed port, go out as ever. That is
+// all detection through the lockdown needs. See firewall.SelfDNSFilterer.
+func (b *Backend) UseDNSFilterForSelf(ctx context.Context) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.dnsFilter = true
+	return nil
+}
+
+var _ firewall.SelfDNSFilterer = (*Backend)(nil)
+
 // loopbackSkipped reports whether pf is set to skip lo0 entirely, which
 // `pfctl -s Interfaces -v` marks as "lo0 (skip)".
 //

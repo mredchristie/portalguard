@@ -30,6 +30,8 @@ type DNSCheck struct {
 	WildcardAddrs []string `json:"wildcard_addrs,omitempty"`
 	// ProbeAddrs maps each probe hostname to what it resolved to.
 	ProbeAddrs map[string][]string `json:"probe_addrs,omitempty"`
+	// Elapsed is how long the check took.
+	Elapsed time.Duration `json:"elapsed,omitempty"`
 }
 
 // ==== hijack detection ====================================================

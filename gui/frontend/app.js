@@ -307,13 +307,18 @@
   function networksHTML() {
     const sc = st.scan;
     let body = '';
+    // Location first: without it macOS hides every name, so a scan error
+    // changes nothing, and checking it first made the screen swap between
+    // the two every few seconds as scans failed busy and succeeded.
+    const needsLocation = sc && sc.power &&
+      (sc.location === 'ask' || (sc.location !== 'allowed' && !(sc.networks || []).length));
     if (!sc) {
       body = `<p class="quiet">Looking for networks…</p>`;
-    } else if (sc.error && !(sc.networks || []).length) {
-      body = `<p class="quiet">${esc(cap(sc.error))}</p>`;
     } else if (!sc.power) {
       body = `<p class="quiet">Wi-Fi is off. Turn it on in the menu bar, and networks will appear here.</p>`;
-    } else if (sc.location === 'ask' || (sc.location !== 'allowed' && !(sc.networks || []).length)) {
+    } else if (!needsLocation && sc.error && !(sc.networks || []).length) {
+      body = `<p class="quiet">${esc(cap(sc.error))}</p>`;
+    } else if (needsLocation) {
       const denied = sc.location === 'denied' || sc.location === 'restricted';
       body = `<div class="permit">
         <svg viewBox="0 0 24 24">${GLYPHS.pin}</svg>

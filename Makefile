@@ -17,7 +17,10 @@ build:
 # /usr/local/bin is root-owned on a stock Mac, so this usually needs sudo.
 PREFIX ?= /usr/local
 
-install: build
+# Not `install: build`: under sudo that would compile as root, which may not
+# find Go and leaves root-owned files in the repo. Build first, as yourself.
+install:
+	@test -x $(BIN_DIR)/$(BINARY) || { echo "build it first, without sudo: make build"; exit 1; }
 	install -d $(PREFIX)/bin
 	install -m 0755 $(BIN_DIR)/$(BINARY) $(PREFIX)/bin/$(BINARY)
 	@echo "installed to $(PREFIX)/bin/$(BINARY) - try: sudo portalguard lockdown"
@@ -120,8 +123,12 @@ APP := gui/build/bin/PortalGuard.app
 # extended attributes (a Documents folder synced to iCloud adds them). So a
 # failed build is accepted only if the app binary was built, and the bundle is
 # stripped of attributes and signed here instead, with the engine inside.
+# Wails from PATH, or where `go install` puts it.
+WAILS ?= $(shell command -v wails 2>/dev/null || echo $(HOME)/go/bin/wails)
+
 app: build
-	cd gui && ($(HOME)/go/bin/wails build -clean || test -x build/bin/PortalGuard.app/Contents/MacOS/PortalGuard)
+	@test -x "$(WAILS)" || { echo "needs the Wails CLI: go install github.com/wailsapp/wails/v2/cmd/wails@v2.16.0"; exit 1; }
+	cd gui && ($(WAILS) build -clean || test -x build/bin/PortalGuard.app/Contents/MacOS/PortalGuard)
 	cp $(BIN_DIR)/portalguard $(APP)/Contents/Resources/portalguard
 	xattr -cr $(APP)
 	codesign --force --deep --sign - $(APP)

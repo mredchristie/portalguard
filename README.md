@@ -16,23 +16,60 @@ macOS, with the firewall built into the kernel (pf):
 
 You log in yourself. It never types a password or clicks accept for you.
 
-## Install
+## Before you start
+
+A Mac (Apple Silicon or Intel; tested on macOS 26) with:
 
 ```sh
-sudo make install                  # portalguard on your PATH
-sudo portalguard install-anchor    # once: adds two lines to /etc/pf.conf
-sudo portalguard install-helper    # once: no password prompts after this
-make app                           # gui/build/bin/PortalGuard.app
+xcode-select --install                                        # Apple's command line tools
+brew install go                                               # Go 1.26.5 or newer (or go.dev/dl)
+go install github.com/wailsapp/wails/v2/cmd/wails@v2.16.0     # builds the app
 ```
 
-`portalguard doctor` says whether the Mac is ready.
+For the VPN to start by itself, it must appear in **System Settings > VPN**
+(the WireGuard app's tunnels do, and so do macOS's built-in VPNs).
+
+## Install
+
+Run these once, in order. Only the `sudo` lines ask for your password.
+
+```sh
+git clone https://github.com/mredchristie/portalguard.git
+cd portalguard
+make build                                # build the command
+sudo make install                         # put it on your PATH as `portalguard`
+sudo portalguard install-anchor           # hook into the firewall (adds two lines to /etc/pf.conf)
+sudo portalguard install-helper           # run as root in the background: no more passwords
+make app                                  # build the app
+cp -R gui/build/bin/PortalGuard.app /Applications/
+portalguard doctor                        # should end with "Ready"
+```
+
+Then, optionally:
+
+```sh
+portalguard vpn list                      # the VPNs macOS knows
+portalguard vpn use "My VPN"              # start this one after you sign in
+portalguard trust Home                    # run on your home Wi-Fi: Arm stands down there
+```
+
+The first time the app opens, allow **Location** when macOS asks: without it,
+macOS hides Wi-Fi network names. The first time Cancel takes you back to your
+usual Wi-Fi, macOS asks to share its saved password: choose **Always Allow**.
+
+**To update:** `git pull`, then `make build`, `sudo make install`,
+`sudo portalguard install-helper` (the helper must match), `make app`, and copy
+the app again.
+
+**To remove:** `sudo portalguard uninstall-helper`,
+`sudo portalguard uninstall-anchor`, `sudo make uninstall`, and delete the app.
 
 ## Use it
 
-**The app:** pick the Wi-Fi network and press **Arm**. It locks the Mac,
-joins the network, opens the login page in your browser, and starts your VPN
-once you have signed in. Cancel stays locked until the Mac is back on its
-usual Wi-Fi, then lets go.
+**The app:** open PortalGuard, pick the Wi-Fi network and press **Arm**. It
+locks the Mac, joins the network, opens the login page in your browser, and
+starts your VPN once you have signed in. Cancel stays locked until the Mac is
+back on its usual Wi-Fi, then lets go.
 
 **The terminal:**
 

@@ -164,6 +164,7 @@ func (s *Session) DetectArmed(ctx context.Context) (portal.Result, error) {
 		s.prober.Resolver = filterResolver()
 	}
 	res := s.prober.Detect(ctx)
+	s.logDetection(res)
 	s.prober.OnPortal, s.prober.Control, s.prober.Resolver = prev, prevControl, prevResolver
 
 	if err := relock(); err != nil {

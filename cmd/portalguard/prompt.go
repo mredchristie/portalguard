@@ -32,6 +32,12 @@ type allowPrompt struct {
 	// cancel, set for a GUI's -json run, ends the run and releases: on a
 	// "cancel" line, and when stdin ends because the app has gone.
 	cancel func(why string)
+	// hold, set with cancel, ends the run and keeps the lockdown: on a
+	// "cancel-hold" line, from an app that will put the Mac back on its
+	// usual network first and then release. Released straight away, the
+	// Mac sat unprotected on the network it was cancelling until the app's
+	// rejoin. Found at EE WiFi.
+	hold func(why string)
 }
 
 // newAllowPrompt starts reading answers from in, or returns nil when in is
@@ -81,6 +87,10 @@ func (p *allowPrompt) read(in io.Reader) {
 // answer acts on one line typed at the prompt.
 func (p *allowPrompt) answer(line string) {
 	a := strings.ToLower(strings.TrimSpace(line))
+	if a == "cancel-hold" && p.hold != nil {
+		p.hold("cancelled from the app")
+		return
+	}
 	if a == "cancel" && p.cancel != nil {
 		p.cancel("cancelled from the app")
 		return

@@ -730,6 +730,8 @@ flags:
 	if err != nil {
 		return fail(err)
 	}
+	// The login page as soon as a probe finds it. See portal.Prober.FirstPortal.
+	prober.FirstPortal = true
 
 	fw := backend.New()
 	if ok, why := fw.Available(ctx); !ok {
@@ -751,7 +753,7 @@ flags:
 	// waiting too, and so the app closing (stdin reaching its end) gives the
 	// network back rather than leave it locked with nothing in charge.
 	var prompt *allowPrompt
-	var appCancelled atomic.Bool
+	var appCancelled, appHeld atomic.Bool
 	fed := g != nil && g.feed != nil
 
 	// From here on the firewall may be engaged, so the safety net matters.
@@ -775,6 +777,13 @@ flags:
 		prompt = newAllowPrompt(ctx, sess, os.Stdin, os.Stdout, g)
 		prompt.cancel = func(why string) {
 			if appCancelled.CompareAndSwap(false, true) {
+				g.emit("note", map[string]any{"text": why})
+				cancel()
+			}
+		}
+		prompt.hold = func(why string) {
+			if appCancelled.CompareAndSwap(false, true) {
+				appHeld.Store(true)
 				g.emit("note", map[string]any{"text": why})
 				cancel()
 			}
@@ -841,8 +850,11 @@ flags:
 		}
 		if err := sess.OpenGap(ctx); err != nil {
 			// The lockdown is still standing; release it rather than
-			// leaving the user offline with no explanation.
-			_ = sess.Release(ctx)
+			// leaving the user offline with no explanation. Unless this is
+			// a cancel, which decides that itself.
+			if ctx.Err() == nil {
+				_ = sess.Release(ctx)
+			}
 			return err
 		}
 		// Only for hosts this site has been seen and verified on before -
@@ -892,7 +904,9 @@ flags:
 		waitCtx, cancel := context.WithTimeout(ctx, *wait)
 		defer cancel()
 		if err := sess.WaitForAuth(waitCtx, *poll); err != nil {
-			_ = sess.Release(ctx)
+			if ctx.Err() == nil {
+				_ = sess.Release(ctx)
+			}
 			var ne *state.NotEnforcedError
 			if errors.As(err, &ne) {
 				return fmt.Errorf("stopped: %v.\n"+
@@ -936,6 +950,21 @@ flags:
 		}
 		return handOff(ctx, sess, endpoints, *handoffWait, g)
 	})
+	if appCancelled.Load() && appHeld.Load() {
+		// Cancelled from an app that rejoins the usual network itself:
+		// everything stays blocked until it has, and then it releases. A
+		// bare lockdown, so no hole the login opened outlives this run.
+		lctx, lcancel := context.WithTimeout(context.Background(), 10*time.Second)
+		lerr := fw.Lockdown(lctx)
+		lcancel()
+		if lerr != nil {
+			g.emit("error", map[string]any{"text": "cancelled, but locking down failed: " + lerr.Error()})
+			return fail(lerr)
+		}
+		logf("cancelled from the app; the lockdown stays until it releases")
+		g.emit("done", map[string]any{"state": sess.Machine().State(), "cancelled": true, "held": true})
+		return exitOK
+	}
 	if appCancelled.Load() {
 		// Cancelled from the app: an error on the way out is the cancel
 		// itself, and the network goes back whatever state it was in.

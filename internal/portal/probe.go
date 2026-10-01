@@ -90,6 +90,12 @@ type Prober struct {
 	// it, before it is resolved and pinned. Detection through a lockdown
 	// uses it to let exactly that lookup through its filter.
 	OnPortal func(host string)
+	// FirstPortal ends detection as soon as one probe names a login page,
+	// rather than waiting for every probe and the DNS check: a portal found
+	// is a portal whatever the rest say, and one slow check (5 seconds, its
+	// timeout, at EE WiFi) held the login page back. What the rest would
+	// have added is only for the report, so `detect` leaves it off.
+	FirstPortal bool
 	// Control, if set, is applied to every connection the probes make: how
 	// detection binds them to the Wi-Fi interface when macOS has joined a
 	// network but not yet given it a default route.
@@ -146,22 +152,42 @@ func (p *Prober) Detect(ctx context.Context) Result {
 	// usual). Results keep the probe list's order, so classification is
 	// exactly as before.
 	res := Result{At: start, Probes: make([]ProbeResult, len(probes))}
+	checkCtx, stop := context.WithCancel(ctx)
+	defer stop()
+	var found sync.Once
 	var wg sync.WaitGroup
 	for i, pr := range probes {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			res.Probes[i] = p.runProbe(ctx, pr)
+			r := p.runProbe(checkCtx, pr)
+			res.Probes[i] = r
+			if p.FirstPortal && r.Class == Portal && r.PortalURL != "" {
+				found.Do(stop)
+			}
 		}()
 	}
 	if !p.SkipDNSCheck {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			res.DNS = p.checkDNS(ctx, probes)
+			began := time.Now()
+			res.DNS = p.checkDNS(checkCtx, probes)
+			res.DNS.Elapsed = time.Since(began)
 		}()
 	}
 	wg.Wait()
+	if ctx.Err() == nil && checkCtx.Err() != nil {
+		// Stopped early: say so, rather than let the stopped ones read as
+		// failures in the report.
+		for i := range res.Probes {
+			if r := &res.Probes[i]; r.Class != Portal && strings.Contains(r.Err, context.Canceled.Error()) {
+				r.Class, r.Reason, r.Err = Skipped, "not needed: another probe found the login page", ""
+			}
+		}
+		res.DNS = DNSCheck{}
+		res.Stopped = true
+	}
 
 	p.classify(&res)
 

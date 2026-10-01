@@ -165,7 +165,7 @@ the measurement when the measurement actually failed.
 ### EE WiFi (paid, £5.99 an hour), 30 September 2026
 
 The first real network for armed mode, auto-allow, and the app. Stopped at
-the price page each time: the payment step is still to be met.
+the price page each time; the paid run is below.
 
 | | |
 | --- | --- |
@@ -196,5 +196,32 @@ Detection now carries on with PortalGuard's own lookups when that happens
 **EE runs on BT's infrastructure**: macOS also asked for `*.btwifi.com`
 service names on it. Refused, correctly: not EE's site.
 
-Still to see: the payment step, whether it needs a host on another site, and
-whether it all holds on a second visit.
+### EE WiFi, paid, 1 October 2026
+
+The whole flow, in the app, with a real £5.99 payment.
+
+| | |
+| --- | --- |
+| Arm to login page | **13.5 s**: macOS joined in 5.1, EE's DHCP took 3.1, detection 5.1 |
+| Payment | **worked, untouched**: `eesecurepayments.ee.co.uk` is EE's own site, so auto-allow opened it. `js.braintreegateway.com` was refused and offered; the payment did not need it |
+| During the login (3.5 minutes) | 534 outgoing packets blocked, 341 lookups refused, 2 hosts opened |
+| Signed in to VPN | **0.5 s**: sealed, `My VPN` started by itself, tunnel up |
+| Second visit | EE remembered the payment: open internet in 1.4 s, then straight to the VPN |
+| Cancel, back to the usual network | **worked**, after the fixes below |
+
+**Detection waited out a timeout.** One check ran its full 5 seconds after
+the other had already found the login page. Detection in `run` and `arm` now
+ends at the first probe to find it, and the trace logs each probe's time.
+
+**Cancel released before leaving EE.** The app rejoined the previous network
+only after the engine had released, so for that moment (or as long as the
+keychain prompt was up) the Mac was unprotected on the network being
+cancelled. The app now sends `cancel-hold`: the engine stops with a bare
+lockdown in place, the app rejoins, then releases. Reading the saved Wi-Fi
+password from the System keychain asked for an administrator every time;
+the app now keeps its own copy in the login keychain after the first time.
+And the button that had been Cancel became Arm and join for the same network
+the moment it was pressed: a second click joined EE again.
+
+**The first Wi-Fi scan after opening the app** failed with "resource busy"
+(macOS was scanning too). It now retries, then uses macOS's cached results.

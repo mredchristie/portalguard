@@ -6,6 +6,7 @@ package main
 #import <Foundation/Foundation.h>
 #import <CoreWLAN/CoreWLAN.h>
 #import <CoreLocation/CoreLocation.h>
+#import <Security/Security.h>
 #include <stdlib.h>
 
 static CLLocationManager *pgLocation;
@@ -47,6 +48,22 @@ static char *pgScan(void) {
 		if (!iface) return strdup("{\"error\":\"this Mac has no Wi-Fi\"}");
 		NSError *err = nil;
 		NSSet<CWNetwork *> *nets = [iface scanForNetworksWithName:nil error:&err];
+		// A scan that clashes with one macOS is already running fails with
+		// "resource busy". Wait and try again, then settle for what macOS's
+		// own last scan found, which is seconds old at most. Seen at EE WiFi,
+		// on the first scan after opening the app.
+		for (int i = 0; i < 3 && err && nets.count == 0; i++) {
+			[NSThread sleepForTimeInterval:1.0];
+			err = nil;
+			nets = [iface scanForNetworksWithName:nil error:&err];
+		}
+		if (err && nets.count == 0) {
+			NSSet<CWNetwork *> *cached = [iface cachedScanResults];
+			if (cached.count > 0) {
+				nets = cached;
+				err = nil;
+			}
+		}
 		NSMutableArray *list = [NSMutableArray array];
 		for (CWNetwork *n in nets) {
 			BOOL open = [n supportsSecurity:kCWSecurityNone];
@@ -70,9 +87,49 @@ static char *pgScan(void) {
 		return strdup(s.UTF8String);
 	}
 }
-// Rejoins a saved network by name: its password from the keychain (macOS asks
-// the user's permission the first time), then an association through
-// CoreWLAN. Returns NULL on success, or why not (the caller frees it).
+// PortalGuard's own copy of a network's password, in the login keychain.
+// macOS keeps Wi-Fi passwords in the System keychain, and reading one from
+// there asks for an administrator's name and password every time, with no
+// "Always Allow". So that is asked once per network, and the copy, which only
+// this app may read, is used from then on.
+static NSString *const pgRejoinService = @"dev.mredchristie.portalguard.rejoin";
+
+static NSString *pgOwnPassword(NSString *ssid) {
+	NSDictionary *q = @{
+		(__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+		(__bridge id)kSecAttrService: pgRejoinService,
+		(__bridge id)kSecAttrAccount: ssid,
+		(__bridge id)kSecReturnData: @YES,
+	};
+	CFTypeRef out = NULL;
+	if (SecItemCopyMatching((__bridge CFDictionaryRef)q, &out) != errSecSuccess || !out) return nil;
+	NSData *data = (__bridge_transfer NSData *)out;
+	return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+}
+
+static NSDictionary *pgOwnItem(NSString *ssid) {
+	return @{
+		(__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+		(__bridge id)kSecAttrService: pgRejoinService,
+		(__bridge id)kSecAttrAccount: ssid,
+	};
+}
+
+static void pgForget(NSString *ssid) {
+	SecItemDelete((__bridge CFDictionaryRef)pgOwnItem(ssid));
+}
+
+static void pgKeepPassword(NSString *ssid, NSString *password) {
+	pgForget(ssid);
+	NSMutableDictionary *add = [pgOwnItem(ssid) mutableCopy];
+	add[(__bridge id)kSecAttrLabel] = [NSString stringWithFormat:@"PortalGuard: rejoin %@", ssid];
+	add[(__bridge id)kSecValueData] = [password dataUsingEncoding:NSUTF8StringEncoding];
+	SecItemAdd((__bridge CFDictionaryRef)add, NULL);
+}
+
+// Rejoins a saved network by name: its password from PortalGuard's own copy,
+// or the first time from macOS's (which asks the user), then an association
+// through CoreWLAN. Returns NULL on success, or why not (the caller frees it).
 static char *pgRejoin(const char *cssid) {
 	@autoreleasepool {
 		CWInterface *iface = [[CWWiFiClient sharedWiFiClient] interface];
@@ -84,7 +141,12 @@ static char *pgRejoin(const char *cssid) {
 		CWNetwork *net = nets.anyObject;
 		if (!net) return strdup([[NSString stringWithFormat:@"%@ is not in range", ssid] UTF8String]);
 		NSString *password = nil;
+		BOOL own = NO;
 		if (![net supportsSecurity:kCWSecurityNone]) {
+			password = pgOwnPassword(ssid);
+			own = password != nil;
+		}
+		if (!own && ![net supportsSecurity:kCWSecurityNone]) {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 			OSStatus st = CWKeychainFindWiFiPassword(kCWKeychainDomainSystem, ssidData, &password);
@@ -97,8 +159,12 @@ static char *pgRejoin(const char *cssid) {
 			}
 		}
 		if (![iface associateToNetwork:net password:password error:&err]) {
+			// A copy that no longer works (the password was changed): drop
+			// it, so the next rejoin asks macOS again.
+			if (own) pgForget(ssid);
 			return strdup([[NSString stringWithFormat:@"could not rejoin %@: %@", ssid, err.localizedDescription] UTF8String]);
 		}
+		if (password && !own) pgKeepPassword(ssid, password);
 		return NULL;
 	}
 }

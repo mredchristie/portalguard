@@ -132,6 +132,11 @@ func armedDetect(ctx context.Context, sess *state.Session, g *guide, note func(s
 		logf("joining %q (was on %s)", join.ssid, start.describe())
 		askedAt := time.Now()
 		if err := netinfo.JoinWiFi(ctx, join.ssid, password); err != nil {
+			if ctx.Err() != nil {
+				// Cancelled mid-join, which macOS may still finish: the
+				// cancel decides what is released, and when.
+				return res, false, ctx.Err()
+			}
 			// Nothing was joined, so there is nothing to protect: give the
 			// network back rather than leave the Mac locked with nowhere to go.
 			if rerr := sess.Release(ctx); rerr != nil {

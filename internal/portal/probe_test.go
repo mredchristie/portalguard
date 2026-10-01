@@ -246,3 +246,55 @@ func TestIsLocalAddr(t *testing.T) {
 		}
 	}
 }
+
+// At EE WiFi one check ran to its timeout while the other had already found
+// the login page, holding the page back 5 seconds. With FirstPortal the first
+// portal ends detection; without it, everything is waited for.
+func TestDetectFirstPortalStopsWaiting(t *testing.T) {
+	captive := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://192.0.2.1/login", http.StatusFound)
+	}))
+	defer captive.Close()
+	release := make(chan struct{})
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer slow.Close()
+	defer close(release)
+
+	p := newProber(captive.URL+"/generate_204", ExpectNoContent)
+	p.Probes = append(p.Probes, Probe{Name: "slow", URL: slow.URL + "/hotspot-detect.html", Expect: ExpectAppleSuccess})
+	p.FirstPortal = true
+
+	res := p.Detect(context.Background())
+	if res.Class != Portal || res.PortalHost != "192.0.2.1" {
+		t.Fatalf("class = %s, host = %q; want PORTAL at 192.0.2.1", res.Class, res.PortalHost)
+	}
+	if res.Took > time.Second {
+		t.Errorf("took %s: waited for the slow probe (timeout %s)", res.Took, p.Timeout)
+	}
+	if !res.Stopped {
+		t.Error("Stopped not set")
+	}
+	if got := res.Probes[1].Class; got != Skipped {
+		t.Errorf("slow probe class = %s, want %s", got, Skipped)
+	}
+}
+
+// Without a portal there is nothing to stop for: an open network waits for
+// every probe, as before.
+func TestDetectFirstPortalOpenWaitsForAll(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	p := newProber(srv.URL+"/generate_204", ExpectNoContent)
+	p.FirstPortal = true
+	res := p.Detect(context.Background())
+	if res.Class != OpenInternet || res.Stopped {
+		t.Fatalf("class = %s, stopped = %v; want OPEN_INTERNET, not stopped", res.Class, res.Stopped)
+	}
+}

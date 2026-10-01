@@ -14,6 +14,10 @@ export function Cancel() {
   return window['go']['main']['App']['Cancel']();
 }
 
+export function CancelHold() {
+  return window['go']['main']['App']['CancelHold']();
+}
+
 export function Doctor() {
   return window['go']['main']['App']['Doctor']();
 }

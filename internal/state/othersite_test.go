@@ -18,6 +18,7 @@ func TestOtherSiteKind(t *testing.T) {
 		"alive.github.com":                        "",
 		"api.whatsapp.net":                        "",
 		"api.anthropic.com":                       "",
+		"api.apple-cloudkit.com":                  "", // iCloud, at the paid EE login
 		"ocsp.digicert.com":                       "",
 		"cloudflare-dns.com":                      "",
 		"example.org":                             "",

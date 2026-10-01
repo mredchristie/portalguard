@@ -8,6 +8,8 @@ export function AskLocation():Promise<void>;
 
 export function Cancel():Promise<void>;
 
+export function CancelHold():Promise<boolean>;
+
 export function Doctor():Promise<Array<Record<string, any>>>;
 
 export function HelperInstalled():Promise<boolean>;

@@ -25,11 +25,12 @@ terminal, so the two cannot disagree about what happened.
 | `waiting` | `for`: `network`, `login`, `vpn` or `handoff`; `timeout_seconds`; `starting` (for `vpn`: the VPN being started, if any) | The user has something to do |
 | `login_url` | `url` | The login page, once the gap is open. Show it as a link: the browser opens it too, but not always in front |
 | `suggest` | `names` | Hosts the page asked for that were not opened by themselves (another site, say a payment page). Offer to open them: see Input |
+| `refused` | `name`, `kind` (`payment` or `other`) | A name on another site was refused that may be what the page is waiting for: a card processor, or an unrecognised site. Background apps' names are left out. Offer to open it, as for `suggest` |
 | `note` | `text` | Something worth telling the user: the DNS filter could not start, a host could not be opened |
 | `trusted` | `label`, `gateway_mac` | Armed, on a trusted network with open internet: stood down |
 | `summary` | `gap_seconds`, `blocked_out_packets`, `lookups_refused`, `lookups_forwarded`, `opened_automatically` | After the seal |
 | `vpn` | `status` (`up`), `interface`, `taken_over` | The VPN's tunnel has the connection and portalguard has stepped aside |
-| `done` | `state` | Finished without an error |
+| `done` | `state`; `cancelled` and `held` after a cancel | Finished without an error. `held`: everything is still blocked, for the app to release (see Input) |
 | `error` | `text` | Finished with one. The rules are released unless the text says otherwise |
 
 The states, in order: `IDLE`, `ARMED` (arm only), `DETECTING` (run only),
@@ -42,6 +43,12 @@ While the login is waiting, each line written to stdin is a host name to open,
 exactly as `portalguard allow <host>` would. `y` opens the last `suggest`
 event's names. An opened host arrives as a `transition` (event `EXTEND_GAP`);
 one that could not be opened arrives as a `note`.
+
+At any point, `cancel` ends the run and gives the network back, as stdin
+ending does. `cancel-hold` ends it too, but leaves a bare lockdown in place
+and says so with `held` on `done`: for an app that first puts the Mac back on
+its usual network, then runs `portalguard release`. Released straight away,
+the Mac is unprotected on the network being cancelled until it has left.
 
 ## Example
 

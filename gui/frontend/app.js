@@ -59,6 +59,7 @@
       // Kept across the engine's own reset on "start": set when arming, and
       // needed after Cancel. Wiped, the app never tried to rejoin.
       returnTo: st ? st.returnTo : '',
+      rejoining: st ? st.rejoining : false,
       password: '',
       joining: '',
       others: [],
@@ -122,7 +123,20 @@
           reset();
           st.doctor = doctor;
           st.note = 'Cancelled. Your network is back.';
-          goBack(returnTo);
+          // Nothing selected, so a second click on the button that was
+          // Cancel cannot arm and join the same network again. It did.
+          st.selected = '';
+          if (ev.held) {
+            // Still locked: back on the usual network first, then release,
+            // so nothing goes out over the one being cancelled.
+            goBack(returnTo, () =>
+              engine.Release().catch((e) => {
+                st.error = `Releasing failed: ${e}`;
+                st.phase = 'error';
+                draw();
+              }),
+            );
+          } else goBack(returnTo);
           break;
         }
         if (st.phase !== 'trusted') {
@@ -345,7 +359,7 @@
 
   function drawActions() {
     const running = !['idle', 'done', 'trusted', 'error'].includes(st.phase);
-    el.primary.disabled = st.phase === 'starting' || (st.phase === 'idle' && !st.selected);
+    el.primary.disabled = st.phase === 'starting' || (st.phase === 'idle' && (!st.selected || st.rejoining));
     if (st.phase === 'idle') {
       const n = selectedNetwork();
       el.primary.textContent = !st.selected
@@ -439,20 +453,23 @@
     if (engine && st.phase === 'error') {
       // The engine stops with the lockdown in place (it fails closed), and
       // has exited: releasing takes a fresh password prompt.
+      // Back on the usual network while still blocked, then release.
       el.primary.disabled = true;
-      engine
-        .Release()
-        .then(() => {
-          goBack();
-          backToNetworks();
-          st.note = 'The network is back, and this Mac is rejoining your usual Wi-Fi.';
-          draw();
-        })
-        .catch((e) => {
-          el.primary.disabled = false;
-          st.error = `${st.error}\n\nReleasing failed: ${e}`;
-          draw();
-        });
+      goBack(undefined, () =>
+        engine
+          .Release()
+          .then(() => {
+            const note = st.note;
+            backToNetworks();
+            st.note = note || 'The network is back.';
+            draw();
+          })
+          .catch((e) => {
+            el.primary.disabled = false;
+            st.error = `${st.error}\n\nReleasing failed: ${e}`;
+            draw();
+          }),
+      );
       return;
     }
     if (engine && !running) {
@@ -460,7 +477,14 @@
       return;
     }
     if (engine) {
-      if (running) engine.Cancel();
+      if (running) {
+        // With a network to go back to: stay blocked until the Mac is back
+        // on it, then release. See the "done" event.
+        if (st.returnTo && engine.CancelHold) {
+          el.primary.disabled = true;
+          engine.CancelHold();
+        } else engine.Cancel();
+      }
       else {
         const doctor = st.doctor;
         reset();
@@ -548,20 +572,28 @@
   // goBack rejoins the network the Mac was on before arming, if it left one.
   // The first time, macOS asks whether PortalGuard may use its saved
   // password: Always Allow, and it does not ask again.
-  function goBack(to) {
+  // then, if given, runs once the rejoin has finished, worked or not.
+  function goBack(to, then) {
     const ssid = to !== undefined ? to : st.returnTo;
-    if (!engine || !ssid) return;
+    if (!engine || !ssid) {
+      if (then) then();
+      return;
+    }
     st.note = `Rejoining ${ssid}…`;
+    st.rejoining = true;
     draw();
     engine
       .Rejoin(ssid)
       .then(() => {
         st.note = `Back on ${ssid}.`;
-        draw();
         setTimeout(scan, 3000);
       })
       .catch((e) => {
         st.note = `Could not rejoin ${ssid} (${e}). Choose it from the Wi-Fi menu.`;
+      })
+      .finally(() => {
+        if (then) then();
+        st.rejoining = false;
         draw();
       });
   }

@@ -330,7 +330,7 @@ func hostnameCategory(host string) string {
 	switch {
 	case containsAny(h, "imap", "smtp", "pop3", "mail.", "outlook.", "exchange."):
 		return "mail"
-	case containsAny(h, "icloud", "drive.google", "docs.google", "dropbox", "onedrive", "box.com"):
+	case containsAny(h, "icloud", "apple-cloudkit", "drive.google", "docs.google", "dropbox", "onedrive", "box.com"):
 		return "cloud sync/storage"
 	case containsAny(h, "push.apple", "courier.push", "gcm-http.googleapis", "fcm.googleapis", "push.services"):
 		return "push notifications"

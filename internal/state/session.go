@@ -339,6 +339,27 @@ func (s *Session) Result() portal.Result {
 // ==== the flow, in order ==================================================
 // Detect, lock down, open the gap, wait for login, seal, hand off.
 
+// logDetection notes how long each check took, so a slow one shows in the
+// trace: at EE WiFi one ran to its 5 second timeout, and nothing said which.
+func (s *Session) logDetection(res portal.Result) {
+	for _, pr := range res.Probes {
+		why := pr.Reason
+		if pr.Err != "" {
+			why = pr.Err
+		}
+		s.logf("detection: probe %s: %s in %s (%s)", pr.Probe.Name, pr.Class, pr.Elapsed.Round(10*time.Millisecond), why)
+	}
+	if res.DNS.Checked {
+		s.logf("detection: DNS check: hijacked=%v in %s", res.DNS.Hijacked, res.DNS.Elapsed.Round(10*time.Millisecond))
+	}
+	switch {
+	case res.Stopped:
+		s.logf("detection: %s, stopped at the first probe to find the login page", res.Took.Round(10*time.Millisecond))
+	default:
+		s.logf("detection: %s", res.Took.Round(10*time.Millisecond))
+	}
+}
+
 // Detect runs the probes and moves the machine to PortalFound or back to Idle.
 func (s *Session) Detect(ctx context.Context) (portal.Result, error) {
 	if _, err := s.machine.Apply(EventDetect, ""); err != nil {
@@ -346,6 +367,7 @@ func (s *Session) Detect(ctx context.Context) (portal.Result, error) {
 	}
 
 	res := s.prober.Detect(ctx)
+	s.logDetection(res)
 	// Follow the portal's redirects now, while the network is open. Only
 	// here: the re-probe during the gap reuses Detect, and must not.
 	s.prober.FollowChain(ctx, &res)

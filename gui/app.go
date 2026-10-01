@@ -286,6 +286,24 @@ func appLog(format string, args ...any) {
 // Cancel asks the engine to stop and give the network back.
 func (a *App) Cancel() { a.send("cancel") }
 
+// CancelHold ends the run but keeps everything blocked, for the app to put
+// the Mac back on its usual network and then Release: released first, the
+// Mac sat unprotected on the network being cancelled until the rejoin. Only
+// through the helper, where releasing asks for no password; without it, a
+// plain Cancel, and the engine leaves the network itself. Reports whether
+// it held.
+func (a *App) CancelHold() bool {
+	a.mu.Lock()
+	held := a.hc != nil
+	a.mu.Unlock()
+	if held {
+		a.send("cancel-hold")
+	} else {
+		a.send("cancel")
+	}
+	return held
+}
+
 // Open asks the engine to open one more host, as `portalguard allow` would.
 func (a *App) Open(host string) { a.send(host) }
 

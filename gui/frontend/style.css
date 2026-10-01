@@ -184,6 +184,11 @@ body {
 .app.is-settings > :not(.top):not(.settings) {
   display: none;
 }
+/* display: flex would otherwise beat the hidden attribute, and a closed
+   panel stayed on screen above the network list. */
+.settings[hidden] {
+  display: none;
+}
 .settings {
   display: flex;
   flex-direction: column;

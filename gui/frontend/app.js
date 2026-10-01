@@ -577,6 +577,10 @@
   function scan() {
     if (!engine) return;
     engine.Networks().then((sc) => {
+      // A scan that clashes with one already running comes back "resource
+      // busy" and empty: keep the last good list rather than lose it.
+      const prev = st.scan && st.scan.networks && st.scan.networks.length;
+      if (sc.error && !(sc.networks || []).length && prev) return;
       st.scan = sc;
       if (st.selected && !(sc.networks || []).some((n) => n.ssid === st.selected)) st.selected = '';
       if (st.phase === 'idle') draw();

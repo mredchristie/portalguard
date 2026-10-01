@@ -287,9 +287,9 @@
     if (st.summary && (st.phase === 'done' || st.phase === 'sealedwait' || st.phase === 'vpn')) {
       const s = st.summary;
       parts.push(`<div class="label">While you signed in</div><div class="stats">
-        <div class="stat"><b data-count="${s.blocked_out_packets || 0}">0</b><span>packets held back</span></div>
-        <div class="stat"><b data-count="${s.lookups_refused || 0}">0</b><span>lookups kept on this Mac</span></div>
-        <div class="stat"><b data-count="${Math.round(s.gap_seconds || 0)}" data-suffix="s">0s</b><span>the gap was open</span></div>
+        <div class="stat"><b data-count="${s.blocked_out_packets || 0}">${s.blocked_out_packets || 0}</b><span>packets held back</span></div>
+        <div class="stat"><b data-count="${s.lookups_refused || 0}">${s.lookups_refused || 0}</b><span>lookups kept on this Mac</span></div>
+        <div class="stat"><b data-count="${Math.round(s.gap_seconds || 0)}" data-suffix="s">${Math.round(s.gap_seconds || 0)}s</b><span>the gap was open</span></div>
       </div>`);
     }
     if (st.phase === 'idle') parts.push(networksHTML());
@@ -378,15 +378,17 @@
       : st.noPassword ? 'No password needed: the PortalGuard helper is installed.' : 'You will be asked for your Mac password.';
   }
 
+  // The real numbers are written first and the count starts at the first
+  // frame: in a frame on another page (the portfolio's) a browser can hold
+  // back animation frames, and every number sat at 0 until it let them go.
   function countUp() {
     el.context.querySelectorAll('[data-count]').forEach((b) => {
       const to = Number(b.dataset.count);
       const suffix = b.dataset.suffix || '';
-      const t0 = performance.now();
+      let t0 = 0;
       const tick = (t) => {
-        // A frame's timestamp can come before t0 (it is when the frame began,
-        // and a background frame's can be long before), which made the count
-        // start in the negative hundreds. Never before zero.
+        if (!b.isConnected) return;
+        if (!t0) t0 = t;
         const k = Math.max(0, Math.min(1, (t - t0) / 900));
         b.textContent = Math.round(to * (1 - Math.pow(1 - k, 3))) + suffix;
         if (k < 1) requestAnimationFrame(tick);
